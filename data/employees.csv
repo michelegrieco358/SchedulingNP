@@ -1,0 +1,7 @@
+employee_id,name,roles,max_week_hours,min_rest_hours,max_overtime_hours
+E1,Alice,nurse|triage,40,11,8
+E2,Bob,nurse,40,11,8
+E3,Carla,doctor,48,11,10
+E4,Diego,nurse,32,11,6
+E5,Eva,doctor,40,11,10
+E6,Fabio,nurse,20,11,5
