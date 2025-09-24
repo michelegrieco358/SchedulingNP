@@ -336,6 +336,14 @@ class ShiftSchedulingCpSolver:
         if total_required_minutes <= 0:
             return 0, False
 
+        shortfall_terms = []
+        if self.shortfall_vars:
+            for shift_id, var in self.shortfall_vars.items():
+                duration = self.duration_minutes.get(shift_id)
+                if duration is not None:
+                    shortfall_terms.append(duration * var)
+        shortfall_expr = sum(shortfall_terms) if shortfall_terms else 0
+
         num_active = len(active_emp_ids)
         deviation_bound = total_required_minutes
 
@@ -346,6 +354,8 @@ class ShiftSchedulingCpSolver:
             over = self.model.NewIntVar(0, deviation_bound, f"workload_over__{emp_id}")
             under = self.model.NewIntVar(0, deviation_bound, f"workload_under__{emp_id}")
             lhs = num_active * assigned_expr - total_required_minutes
+            if shortfall_terms:
+                lhs = lhs + shortfall_expr
             rhs = num_active * over - num_active * under
             self.model.Add(lhs == rhs)
             self.workload_dev_vars.extend([over, under])
