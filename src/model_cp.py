@@ -24,6 +24,7 @@ OVERTIME_COST_SCALE = 100
 DEFAULT_OVERTIME_PRIORITY = 1000
 DEFAULT_FAIRNESS_WEIGHT = 1
 DEFAULT_OVERTIME_COST_WEIGHT = 1000
+DEFAULT_SHORTFALL_PRIORITY = 2_000_000
 DEFAULT_GLOBAL_OVERTIME_CAP_MINUTES = None
 
 @dataclass
@@ -33,6 +34,7 @@ class SolverConfig:
     log_search_progress: bool = False
     global_min_rest_hours: float = DEFAULT_GLOBAL_MIN_REST_HOURS
     overtime_priority: int = DEFAULT_OVERTIME_PRIORITY
+    shortfall_priority: int = DEFAULT_SHORTFALL_PRIORITY
     fairness_weight: int = DEFAULT_FAIRNESS_WEIGHT
     default_overtime_cost_weight: int = DEFAULT_OVERTIME_COST_WEIGHT
     global_overtime_cap_minutes: int | None = None
@@ -62,6 +64,7 @@ class ShiftSchedulingCpSolver:
         self.workload_dev_vars: list[cp_model.IntVar] = []
         self._vars_by_shift: dict[str, list[cp_model.BoolVar]] = {}
         self._vars_by_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
+        self.shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_cost_weights: dict[str, int] = {}
         self.global_overtime_cap_minutes: int | None = config.global_overtime_cap_minutes
@@ -100,7 +103,8 @@ class ShiftSchedulingCpSolver:
             self._vars_by_emp.setdefault(emp_id, []).append((shift_id, var))
 
     def _add_shift_coverage_constraints(self) -> None:
-        """Imposta che ogni turno abbia esattamente il personale richiesto."""
+        """Gestisce la copertura dei turni consentendo scoperture penalizzate."""
+        self.shortfall_vars = {}
         for _, shift_row in self.shifts.iterrows():
             shift_id = shift_row["shift_id"]
             required_staff = int(shift_row["required_staff"])
@@ -111,9 +115,13 @@ class ShiftSchedulingCpSolver:
                 print(f"[WARN] Turno {shift_id}: capacita disponibili {len(vars_for_shift)} < required {required_staff}")
 
             if not vars_for_shift:
-                raise ValueError(f"Nessuna variabile di assegnazione per il turno {shift_id}")
+                print(f"[WARN] Turno {shift_id}: nessun dipendente assegnabile, verranno contabilizzati minuti di shortfall")
 
-            self.model.Add(sum(vars_for_shift) == required_staff)
+            shortfall_var = self.model.NewIntVar(0, required_staff, f"shortfall__{shift_id}")
+            self.shortfall_vars[shift_id] = shortfall_var
+
+            assign_expr = sum(vars_for_shift) if vars_for_shift else 0
+            self.model.Add(assign_expr + shortfall_var == required_staff)
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
         """Pre-calcola la durata di ogni turno in minuti interi."""
@@ -281,6 +289,25 @@ class ShiftSchedulingCpSolver:
         cost_per_minute = int(round(cost_per_hour * OVERTIME_COST_SCALE / 60))
         return max(1, cost_per_minute)
 
+    def _compute_shortfall_cost_expr(self):
+        if not self.shortfall_vars:
+            return 0, False
+
+        if not self.duration_minutes:
+            raise ValueError("Le durate dei turni devono essere disponibili per calcolare il costo di shortfall.")
+
+        terms = []
+        for shift_id, var in self.shortfall_vars.items():
+            duration = self.duration_minutes.get(shift_id)
+            if duration is None:
+                raise ValueError(f"Durata non disponibile per il turno {shift_id}")
+            terms.append(duration * var)
+
+        if not terms:
+            return 0, False
+
+        return sum(terms), True
+
     def _compute_overtime_cost_expr(self):
         if not self.overtime_vars:
             return 0, False
@@ -328,14 +355,17 @@ class ShiftSchedulingCpSolver:
         return sum(self.workload_dev_vars), True
 
     def _set_objective(self) -> None:
+        shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
         overtime_expr, has_overtime = self._compute_overtime_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
 
-        if not has_overtime and not has_fairness:
+        if not (has_shortfall or has_overtime or has_fairness):
             self.model.Minimize(0)
             return
 
         terms = []
+        if has_shortfall:
+            terms.append(self.config.shortfall_priority * shortfall_expr)
         if has_overtime:
             terms.append(self.config.overtime_priority * overtime_expr)
         if has_fairness:
@@ -439,6 +469,26 @@ class ShiftSchedulingCpSolver:
             )
 
         return pd.DataFrame(rows, columns=["employee_id", "overtime_minutes", "overtime_hours"])
+
+    def extract_shortfall_summary(self, solver: cp_model.CpSolver) -> pd.DataFrame:
+        """Riepiloga la scopertura residua per ciascun turno."""
+        if not self.shortfall_vars:
+            return pd.DataFrame(columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
+
+        rows = []
+        for shift_id, var in self.shortfall_vars.items():
+            units = solver.Value(var)
+            if units <= 0:
+                continue
+            duration = self.duration_minutes.get(shift_id, 0)
+            rows.append(
+                {"shift_id": shift_id, "shortfall_units": units, "shortfall_staff_minutes": units * duration}
+            )
+
+        if not rows:
+            return pd.DataFrame(columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
+
+        return pd.DataFrame(rows, columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
 
     def log_employee_summary(self, solver: cp_model.CpSolver) -> None:
         """Logga minuti assegnati, straordinari e notti per dipendente (totali e per settimana)."""
@@ -576,6 +626,11 @@ def main(argv: list[str] | None = None) -> int:
     if not overtime_df.empty:
         print("\nStraordinari (minuti per dipendente):")
         print(overtime_df.to_string(index=False, formatters={"overtime_hours": lambda v: f"{v:.2f}"}))
+
+    shortfall_df = solver.extract_shortfall_summary(cp_solver)
+    if not shortfall_df.empty:
+        print("\nShortfall turni scoperti:")
+        print(shortfall_df.to_string(index=False))
 
     solver.log_employee_summary(cp_solver)
 

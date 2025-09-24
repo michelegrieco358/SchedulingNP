@@ -15,7 +15,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from model_cp import ShiftSchedulingCpSolver, SolverConfig  # noqa: E402
 
 
-def test_rest_conflict_makes_model_infeasible():
+def test_rest_conflict_triggers_shortfall():
     employees = pd.DataFrame([
         {
             "employee_id": "E1",
@@ -67,10 +67,19 @@ def test_rest_conflict_makes_model_infeasible():
     solver.build()
     result = solver.solve()
 
-    assert result.StatusName() == "INFEASIBLE"
+    assert result.StatusName() == "OPTIMAL"
+
+    assignments_df = solver.extract_assignments(result)
+    assert len(assignments_df) == 1
+
+    shortfall_df = solver.extract_shortfall_summary(result)
+    assert not shortfall_df.empty
+    assert set(shortfall_df["shift_id"]).issubset({"S1", "S2"})
+    assert shortfall_df["shortfall_units"].sum() == 1
+    assert shortfall_df["shortfall_staff_minutes"].sum() == 240
 
 
-def test_night_constraints_block_consecutive_nights():
+def test_night_constraints_block_consecutive_nights_via_shortfall():
     employees = pd.DataFrame([
         {
             "employee_id": "E1",
@@ -118,10 +127,19 @@ def test_night_constraints_block_consecutive_nights():
     solver.build()
     result = solver.solve()
 
-    assert result.StatusName() == "INFEASIBLE"
+    assert result.StatusName() == "OPTIMAL"
+
+    assignments_df = solver.extract_assignments(result)
+    assert len(assignments_df) == 1
+
+    shortfall_df = solver.extract_shortfall_summary(result)
+    assert not shortfall_df.empty
+    assert set(shortfall_df["shift_id"]) <= {"N1", "N2"}
+    assert shortfall_df["shortfall_units"].sum() == 1
+    assert shortfall_df["shortfall_staff_minutes"].sum() == 480
 
 
-def test_night_constraints_limit_three_per_week():
+def test_night_constraints_limit_three_per_week_via_shortfall():
     employees = pd.DataFrame([
         {
             "employee_id": "E1",
@@ -187,7 +205,14 @@ def test_night_constraints_limit_three_per_week():
     solver.build()
     result = solver.solve()
 
-    assert result.StatusName() == "INFEASIBLE"
+    assert result.StatusName() == "OPTIMAL"
+
+    assignments_df = solver.extract_assignments(result)
+    assert len(assignments_df) == 3
+
+    shortfall_df = solver.extract_shortfall_summary(result)
+    assert shortfall_df["shortfall_units"].sum() == 1
+    assert shortfall_df["shortfall_staff_minutes"].sum() == 480
 
 
 def test_overtime_soft_constraint_allows_solution():
@@ -331,3 +356,142 @@ def test_log_employee_summary_outputs(capsys):
     out = capsys.readouterr().out
     assert "E1" in out
     assert "Straordinario" in out or "straordinario" in out
+
+def test_shortfall_zero_when_coverage_possible():
+    employees = pd.DataFrame([
+        {
+            "employee_id": "E1",
+            "name": "Alice",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+        {
+            "employee_id": "E2",
+            "name": "Bob",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+    ])
+
+    shifts = pd.DataFrame([
+        {
+            "shift_id": "S1",
+            "day": date(2025, 2, 1),
+            "start_dt": datetime(2025, 2, 1, 8, 0),
+            "end_dt": datetime(2025, 2, 1, 16, 0),
+            "duration_h": 8.0,
+            "role": "front",
+            "required_staff": 1,
+        },
+        {
+            "shift_id": "S2",
+            "day": date(2025, 2, 2),
+            "start_dt": datetime(2025, 2, 2, 8, 0),
+            "end_dt": datetime(2025, 2, 2, 16, 0),
+            "duration_h": 8.0,
+            "role": "front",
+            "required_staff": 1,
+        },
+    ])
+
+    assign_mask = pd.DataFrame([
+        {"employee_id": "E1", "shift_id": "S1", "can_assign": 1},
+        {"employee_id": "E2", "shift_id": "S2", "can_assign": 1},
+    ])
+
+    solver = ShiftSchedulingCpSolver(
+        employees=employees,
+        shifts=shifts,
+        assign_mask=assign_mask,
+        rest_conflicts=None,
+        overtime_costs=None,
+        config=SolverConfig(max_seconds=5, log_search_progress=False),
+    )
+    solver.build()
+    result = solver.solve()
+
+    assert result.StatusName() == "OPTIMAL"
+
+    shortfall_df = solver.extract_shortfall_summary(result)
+    assert shortfall_df.empty
+
+    assignments_df = solver.extract_assignments(result)
+    assert set(assignments_df["shift_id"]) == {"S1", "S2"}
+    assert set(assignments_df["employee_id"]) == {"E1", "E2"}
+
+
+def test_shortfall_priority_increase_preserves_solution():
+    employees = pd.DataFrame([
+        {
+            "employee_id": "E1",
+            "name": "Alice",
+            "roles": "front",
+            "max_week_hours": 8,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 16,
+        }
+    ])
+
+    shifts = pd.DataFrame([
+        {
+            "shift_id": f"D{i}",
+            "day": date(2025, 3, i),
+            "start_dt": datetime(2025, 3, i, 8, 0),
+            "end_dt": datetime(2025, 3, i, 16, 0),
+            "duration_h": 8.0,
+            "role": "front",
+            "required_staff": 1,
+        }
+        for i in range(1, 4)
+    ])
+
+    assign_mask = pd.DataFrame([
+        {"employee_id": "E1", "shift_id": row.shift_id, "can_assign": 1}
+        for row in shifts.itertuples()
+    ])
+
+    overtime_costs = pd.DataFrame([
+        {"role": "front", "overtime_cost_per_hour": 25.0}
+    ])
+
+    def solve_with_priority(priority=None):
+        config_kwargs = dict(max_seconds=5, log_search_progress=False)
+        if priority is not None:
+            config_kwargs["shortfall_priority"] = priority
+        solver = ShiftSchedulingCpSolver(
+            employees=employees.copy(),
+            shifts=shifts.copy(),
+            assign_mask=assign_mask.copy(),
+            rest_conflicts=None,
+            overtime_costs=overtime_costs,
+            config=SolverConfig(**config_kwargs),
+        )
+        solver.build()
+        solver_result = solver.solve()
+        assignments = solver.extract_assignments(solver_result)
+        shortfall_df = solver.extract_shortfall_summary(solver_result)
+        return solver_result, assignments, shortfall_df
+
+    default_result, default_assignments, default_shortfall = solve_with_priority()
+    high_priority_result, high_priority_assignments, high_priority_shortfall = solve_with_priority(10_000_000)
+
+    assert default_result.StatusName() == "OPTIMAL"
+    assert high_priority_result.StatusName() == "OPTIMAL"
+
+    assert default_shortfall.empty
+    assert high_priority_shortfall.empty
+
+    default_pairs = {
+        (row.employee_id, row.shift_id)
+        for row in default_assignments.itertuples(index=False)
+    }
+    high_priority_pairs = {
+        (row.employee_id, row.shift_id)
+        for row in high_priority_assignments.itertuples(index=False)
+    }
+
+    assert default_pairs == high_priority_pairs
