@@ -639,6 +639,9 @@ def _load_data(
     shifts_norm = precompute.normalize_shift_times(shifts)
     quali_mask = loader.build_quali_mask(employees, shifts)
     assign_mask = loader.merge_availability(quali_mask, availability)
+    time_off = loader.load_time_off(data_dir / "time_off.csv", employees)
+    assign_mask = loader.apply_time_off(assign_mask, time_off, shifts_norm)
+
     preferences_raw = loader.load_preferences(data_dir / "preferences.csv", employees, shifts)
     assignable_pairs = assign_mask[assign_mask["can_assign"] == 1][["employee_id", "shift_id"]].drop_duplicates().copy()
     preferences_filtered = assignable_pairs.merge(

@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from datetime import time
+from datetime import datetime, time
 
 import pandas as pd
 import pytest
@@ -110,3 +110,67 @@ def test_load_preferences_validates_and_clamps(tmp_path):
     s2_row = prefs[(prefs["employee_id"] == "E2") & (prefs["shift_id"] == "S2")]
     assert not s2_row.empty
     assert s2_row.iloc[0]["score"] == -2
+
+
+def test_load_time_off_parsing_and_validation(tmp_path):
+    employees = pd.DataFrame({"employee_id": ["E1", "E2"]})
+
+    csv_path = tmp_path / "time_off.csv"
+    csv_path.write_text(
+        "employee_id,day,start_time,end_time,reason\n"
+        "E1,2025-05-01,08:00,12:00,permesso\n"
+        "E1,2025-05-02,,,ferie\n"
+        "E3,2025-05-03,09:00,10:00,invalid\n",
+        encoding="utf-8",
+    )
+
+    with pytest.warns(RuntimeWarning):
+        time_off = loader.load_time_off(csv_path, employees)
+
+    assert len(time_off) == 2
+
+    first = time_off[(time_off["employee_id"] == "E1") & (time_off["off_start_dt"] == pd.Timestamp("2025-05-01 08:00:00"))]
+    assert not first.empty
+    assert first.iloc[0]["off_end_dt"] == pd.Timestamp("2025-05-01 12:00:00")
+
+    full_day = time_off[time_off["reason"] == "ferie"]
+    assert not full_day.empty
+    assert full_day.iloc[0]["off_start_dt"] == pd.Timestamp("2025-05-02 00:00:00")
+    assert full_day.iloc[0]["off_end_dt"] == pd.Timestamp("2025-05-03 00:00:00")
+
+
+def test_apply_time_off_blocks_overlap(capsys):
+    assign_mask = pd.DataFrame(
+        [
+            {"employee_id": "E1", "shift_id": "S1", "can_assign": 1, "qual_ok": 1, "is_available": 1},
+            {"employee_id": "E2", "shift_id": "S1", "can_assign": 1, "qual_ok": 1, "is_available": 1},
+        ]
+    )
+    shifts_norm = pd.DataFrame(
+        [
+            {"shift_id": "S1", "start_dt": pd.Timestamp("2025-05-01 08:00:00"), "end_dt": pd.Timestamp("2025-05-01 16:00:00")},
+        ]
+    )
+    time_off = pd.DataFrame(
+        [
+            {
+                "employee_id": "E1",
+                "off_start_dt": pd.Timestamp("2025-05-01 07:30:00"),
+                "off_end_dt": pd.Timestamp("2025-05-01 12:30:00"),
+                "reason": "permesso",
+            }
+        ]
+    )
+
+    updated = loader.apply_time_off(assign_mask, time_off, shifts_norm)
+
+    out = capsys.readouterr().out
+    assert "Time-off" in out
+
+    e1_row = updated[(updated["employee_id"] == "E1") & (updated["shift_id"] == "S1")]
+    e2_row = updated[(updated["employee_id"] == "E2") & (updated["shift_id"] == "S1")]
+
+    assert int(e1_row.iloc[0]["timeoff_block"]) == 1
+    assert int(e1_row.iloc[0]["can_assign"]) == 0
+    assert int(e2_row.iloc[0]["timeoff_block"]) == 0
+    assert int(e2_row.iloc[0]["can_assign"]) == 1

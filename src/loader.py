@@ -1,7 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from dateutil import parser as dtparser
 
 import pandas as pd
@@ -203,6 +203,134 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
 
     df = df.drop_duplicates(subset=["employee_id", "shift_id"], keep="last").reset_index(drop=True)
     return df
+
+
+def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
+    columns = ["employee_id", "off_start_dt", "off_end_dt", "reason"]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = ["employee_id", "day"]
+    _ensure_columns(df, required, path.name)
+
+    df = df.copy()
+    df["employee_id"] = df["employee_id"].astype(str)
+    df["day"] = df["day"].astype(str)
+
+    if "reason" not in df.columns:
+        df["reason"] = ""
+
+    def _parse_optional_time(value):
+        if pd.isna(value) or str(value).strip() == "":
+            return None
+        return _parse_time_hhmm(str(value))
+
+    records = []
+    for _, row in df.iterrows():
+        try:
+            day = _parse_date_iso(str(row["day"]))
+        except ValueError as exc:
+            warnings.warn(f"{path.name}: riga ignorata per data non valida ({row})", RuntimeWarning)
+            continue
+
+        start_time = _parse_optional_time(row.get("start_time"))
+        end_time = _parse_optional_time(row.get("end_time"))
+
+        if start_time is None:
+            start_time = time(0, 0)
+        off_start_dt = datetime.combine(day, start_time)
+
+        if end_time is None:
+            off_end_dt = datetime.combine(day + timedelta(days=1), time(0, 0))
+        else:
+            off_end_dt = datetime.combine(day, end_time)
+            if off_end_dt <= off_start_dt:
+                off_end_dt += timedelta(days=1)
+
+        records.append(
+            {
+                "employee_id": row["employee_id"],
+                "off_start_dt": off_start_dt,
+                "off_end_dt": off_end_dt,
+                "reason": str(row.get("reason", "")),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    result = pd.DataFrame(records, columns=columns)
+
+    valid_employees = set(employees["employee_id"].astype(str))
+    mask_valid = result["employee_id"].isin(valid_employees)
+    if not mask_valid.all():
+        invalid_count = (~mask_valid).sum()
+        warnings.warn(
+            f"{path.name}: scartate {invalid_count} righe con employee_id non valido",
+            RuntimeWarning,
+        )
+        result = result[mask_valid]
+
+    if result.empty:
+        return pd.DataFrame(columns=columns)
+
+    result = result.drop_duplicates().reset_index(drop=True)
+    return result
+
+
+def apply_time_off(assign_mask: pd.DataFrame, time_off: pd.DataFrame, shifts_norm: pd.DataFrame) -> pd.DataFrame:
+    if assign_mask.empty:
+        result = assign_mask.copy()
+        result["timeoff_block"] = 0
+        return result
+
+    result = assign_mask.copy()
+    result["timeoff_block"] = 0
+
+    if time_off is None or time_off.empty:
+        return result
+
+    required_cols = {"shift_id", "start_dt", "end_dt"}
+    if not required_cols.issubset(shifts_norm.columns):
+        raise ValueError("shifts_norm deve includere start_dt ed end_dt per applicare i time-off")
+
+    shift_times = shifts_norm[["shift_id", "start_dt", "end_dt"]].drop_duplicates()
+    merged = result.merge(shift_times, on="shift_id", how="left")
+    merged = merged.merge(time_off, on="employee_id", how="left")
+
+    if merged["off_start_dt"].isna().all():
+        return result
+
+    overlap = (
+        merged["off_start_dt"].notna()
+        & (merged["off_start_dt"] < merged["end_dt"])
+        & (merged["off_end_dt"] > merged["start_dt"])
+    )
+    merged["overlap"] = overlap.astype(int)
+
+    flags = merged.groupby(["employee_id", "shift_id"])["overlap"].max().reset_index()
+    if flags.empty:
+        return result
+
+    result = result.drop(columns=["timeoff_block"]).merge(flags, on=["employee_id", "shift_id"], how="left")
+    result.rename(columns={"overlap": "timeoff_block"}, inplace=True)
+    result["timeoff_block"] = result["timeoff_block"].fillna(0).astype(int)
+    result["can_assign"] = (result["can_assign"].astype(int) * (1 - result["timeoff_block"])).astype(int)
+
+    blocked = result[result["timeoff_block"] == 1]
+    if not blocked.empty:
+        total = int(blocked["timeoff_block"].sum())
+        per_emp = (
+            blocked.groupby("employee_id")["timeoff_block"].sum().sort_values(ascending=False)
+        )
+        summary = ", ".join(f"{emp}: {int(cnt)}" for emp, cnt in per_emp.items())
+        print(f"Time-off: {total} coppie escluse ({summary})")
+
+    return result
 
 def merge_availability(quali_mask: pd.DataFrame, availability: pd.DataFrame) -> pd.DataFrame:
     """

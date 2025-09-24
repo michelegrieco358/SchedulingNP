@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, time
 
 try:
     from ortools.sat.python import cp_model
@@ -11,6 +11,9 @@ except ModuleNotFoundError:
     pytest.skip("ortools non installato, salto i test del solver", allow_module_level=True)
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+
+import loader  # noqa: E402
+import precompute  # noqa: E402
 
 from model_cp import (
     ShiftSchedulingCpSolver,
@@ -574,3 +577,77 @@ def test_preferences_steer_assignments():
     assert e1_row["liked_assigned"] == 1
     assert e1_row["disliked_assigned"] == 0
     assert e1_row["total_score"] == 2
+
+
+def test_time_off_blocks_assignments():
+    employees = pd.DataFrame([
+        {
+            "employee_id": "E1",
+            "name": "Alice",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+        {
+            "employee_id": "E2",
+            "name": "Bob",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+    ])
+
+    shifts = pd.DataFrame([
+        {
+            "shift_id": "S1",
+            "day": date(2025, 5, 1),
+            "start": time(8, 0),
+            "end": time(16, 0),
+            "role": "front",
+            "required_staff": 1,
+        }
+    ])
+
+    availability = pd.DataFrame([
+        {"employee_id": "E1", "shift_id": "S1", "is_available": 1},
+        {"employee_id": "E2", "shift_id": "S1", "is_available": 1},
+    ])
+
+    shifts_norm = precompute.normalize_shift_times(shifts)
+    quali_mask = loader.build_quali_mask(employees, shifts)
+    assign_mask = loader.merge_availability(quali_mask, availability)
+
+    time_off = pd.DataFrame([
+        {
+            "employee_id": "E1",
+            "off_start_dt": datetime(2025, 5, 1, 0, 0),
+            "off_end_dt": datetime(2025, 5, 2, 0, 0),
+            "reason": "ferie",
+        }
+    ])
+
+    assign_mask = loader.apply_time_off(assign_mask, time_off, shifts_norm)
+
+    solver = ShiftSchedulingCpSolver(
+        employees=employees,
+        shifts=shifts_norm,
+        assign_mask=assign_mask,
+        rest_conflicts=None,
+        overtime_costs=None,
+        preferences=None,
+        config=SolverConfig(max_seconds=5, log_search_progress=False),
+    )
+    solver.build()
+    result = solver.solve()
+
+    assert result.StatusName() == "OPTIMAL"
+
+    assignments = solver.extract_assignments(result)
+    assert set(assignments["employee_id"]) == {"E2"}
+    assert set(assignments["shift_id"]) == {"S1"}
+
+    e1_mask = assign_mask[(assign_mask["employee_id"] == "E1") & (assign_mask["shift_id"] == "S1")]
+    assert int(e1_mask.iloc[0]["timeoff_block"]) == 1
+
