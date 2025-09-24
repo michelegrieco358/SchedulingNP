@@ -26,13 +26,13 @@ Output: assegnazioni turno→dipendente che rispettano vincoli operativi, **mini
 ## Caratteristiche
 
 - **Copertura turni:** ogni turno copre esattamente `required_staff`.
-- **Riposo minimo:** blocco di coppie di turni troppo vicini (**deduplicate**, nessun self-pair, direzione temporale corretta).  
-  Le coppie in conflitto sono pre-calcolate e pulite in `precompute.py`.
+- **Riposo minimo:** blocco di coppie di turni troppo vicini non vengono accettati.  
+  Le coppie di turni in conflitto sono pre-calcolate e pulite in `precompute.py`.
 - **Un turno al giorno:** max 1 turno per dipendente per `start_dt.date()`.
-- **Turni notte:** nessuna notte consecutiva; max **3** notti per settimana ISO (calcolata da `start_dt`).
+- **Turni notte:** nessuna notte consecutiva; previsto un massimo di notti per settimana ISO (calcolata da `start_dt`).
 - **Ore massime & straordinario:** minuti assegnati ≤ `max_week_hours` + overtime (limitato per dipendente).
 - **Fairness (L1):** riduce lo scostamento in minuti rispetto alla **quota media** tra i dipendenti attivi.
-- **Pre-processing robusto:** normalizzazione orari (cross‑midnight), conflitti di riposo deduplicati, eleggibilità costruita **via join per ruolo** (no cartesiano).
+- **Pre-processing robusto:** normalizzazione orari (cross‑midnight), conflitti di riposo deduplicati, eleggibilità costruita **via join per ruolo**
 - **Nota:** lo **shortfall di copertura** non è ancora attivo (sarà aggiunto successivamente).
 
 ---
@@ -55,7 +55,7 @@ dove:
 - `C_overtime` è il costo totale di straordinario (minuti di overtime × costo orario per ruolo);
 - `over_e, under_e ≥ 0` sono i minuti di scostamento dal target medio per il dipendente `e` (deviazione L1).
 
-> Quando introdurrai lo **shortfall** (slack di copertura), la gerarchia consigliata diventerà:
+> Quando introdurremo lo **shortfall** (slack di copertura), la gerarchia consigliata diventerà:
 > `λ_shortfall  >>  λ_overtime  >>  λ_fairness`  
 > (oppure una vera ottimizzazione in due fasi: prima minimizzare lo shortfall, poi – a valore fissato – ottimizzare overtime + fairness).
 
@@ -75,7 +75,7 @@ pip install -U ortools pandas python-dateutil
 
 ## Dati di input (CSV)
 
-Metti i CSV in `data/` (o passa `--data-dir`).
+Mettere i CSV in `data/` (o passa `--data-dir`).
 
 ### `employees.csv`
 
@@ -177,7 +177,7 @@ Opzioni principali:
 
 - **INFEASIBLE**: senza shortfall, può accadere se mancano candidati per alcuni turni.  
   → Usa l’output di `loader.py` per individuare i buchi (turni senza candidati) o riduci vincoli.
-- **Solve lento**: assicurati che i conflitti siano deduplicati (già fatto) e che l’eleggibilità sia via join per ruolo (già fatto). Riduci orizzonte o imposta `--max-seconds`.
+- **Solve lento**: Imposta `--max-seconds`.
 
 ---
 
@@ -208,7 +208,3 @@ Opzioni principali:
 ```
 
 ---
-
-## Licenza
-
-Scegli e aggiungi la licenza del progetto (es. MIT).
