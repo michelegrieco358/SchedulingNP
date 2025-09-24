@@ -19,7 +19,6 @@ except ImportError:  # fallback when running as a script
     import loader  # type: ignore
     import precompute  # type: ignore
 
-
 DEFAULT_GLOBAL_MIN_REST_HOURS = 8.0
 OVERTIME_COST_SCALE = 100
 DEFAULT_OVERTIME_PRIORITY = 1000
@@ -27,11 +26,9 @@ DEFAULT_FAIRNESS_WEIGHT = 1
 DEFAULT_OVERTIME_COST_WEIGHT = 1000
 DEFAULT_GLOBAL_OVERTIME_CAP_MINUTES = None
 
-
 @dataclass
 class SolverConfig:
     """Parametri base per il solver CP-SAT."""
-
     max_seconds: float = 30.0
     log_search_progress: bool = False
     global_min_rest_hours: float = DEFAULT_GLOBAL_MIN_REST_HOURS
@@ -40,10 +37,8 @@ class SolverConfig:
     default_overtime_cost_weight: int = DEFAULT_OVERTIME_COST_WEIGHT
     global_overtime_cap_minutes: int | None = None
 
-
 class ShiftSchedulingCpSolver:
     """Costruisce e risolve il modello CP-SAT per l'MVP."""
-
     def __init__(
         self,
         employees: pd.DataFrame,

@@ -15,13 +15,12 @@ def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
     df = shifts.copy()
 
     def _mk_dt(day_obj, hhmm):
-        # day_obj ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ un datetime.date; hhmm ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ un datetime.time (giÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â  parsati dal loader)
         return datetime.combine(day_obj, hhmm)
 
     start_dt = df.apply(lambda r: _mk_dt(r["day"], r["start"]), axis=1)
     end_dt_raw = df.apply(lambda r: _mk_dt(r["day"], r["end"]), axis=1)
 
-    # se l'end non ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¨ strettamente dopo lo start, gestisci i casi
+    # se l'end non è strettamente dopo lo start, gestisci i casi
     end_dt = []
     for s, e in zip(start_dt, end_dt_raw):
         if e < s:
@@ -46,9 +45,9 @@ def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
 # --- 2) Tabella gap tra TUTTE le coppie di turni (s, s') ---
 def compute_gap_table(shifts_norm: pd.DataFrame) -> pd.DataFrame:
     """
-    Restituisce un DataFrame lungo con colonne:
+    Restituisce un DataFrame con colonne:
       - shift_id_from, shift_id_to, gap_h
-    dove gap_h = ore tra fine di 'from' e inizio di 'to' (puÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â² essere negativo se si sovrappongono).
+    dove gap_h = ore tra fine di 'from' e inizio di 'to', può essere negativo se si sovrappongono).
     """
     a = shifts_norm[["shift_id", "start_dt", "end_dt"]].copy()
     b = shifts_norm[["shift_id", "start_dt"]].copy()

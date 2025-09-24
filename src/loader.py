@@ -47,7 +47,7 @@ def load_employees(path: Path) -> pd.DataFrame:
     df["min_rest_hours"] = pd.to_numeric(df["min_rest_hours"], errors="raise").astype(int)
     df["max_overtime_hours"] = pd.to_numeric(df["max_overtime_hours"], errors="raise").astype(int)
 
-    # unicitÃƒÂ  id
+    # unicità  id
     if df["employee_id"].duplicated().any():
         dups = df[df["employee_id"].duplicated()]["employee_id"].tolist()
         raise ValueError(f"employees.csv: employee_id duplicati: {dups}")
@@ -87,7 +87,7 @@ def load_shifts(path: Path) -> pd.DataFrame:
         raise ValueError("shifts.csv: required_staff deve essere >= 1")
 
     # controllo orari (accettiamo end=00:00 come 'fine a mezzanotte')
-    # Non calcoliamo ancora la durata: sarÃƒÂ  fatto in precompute (step successivo).
+    # Non calcoliamo ancora la durata: sarà fatto in precompute (step successivo).
     return df
 
 
