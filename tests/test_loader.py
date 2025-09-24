@@ -71,3 +71,42 @@ def test_merge_availability_includes_unqualified_from_availability():
     assert not row.empty
     assert row.iloc[0]["qual_ok"] == 0
     assert row.iloc[0]["can_assign"] == 0
+
+
+def test_load_preferences_handles_missing_file(tmp_path):
+    employees = pd.DataFrame({"employee_id": ["E1"]})
+    shifts = pd.DataFrame({"shift_id": ["S1"]})
+
+    prefs = loader.load_preferences(tmp_path / "preferences.csv", employees, shifts)
+
+    assert prefs.empty
+    assert list(prefs.columns) == ["employee_id", "shift_id", "score"]
+
+
+
+def test_load_preferences_validates_and_clamps(tmp_path):
+    employees = pd.DataFrame({"employee_id": ["E1", "E2"]})
+    shifts = pd.DataFrame({"shift_id": ["S1", "S2"]})
+
+    csv_path = tmp_path / "preferences.csv"
+    csv_path.write_text(
+        "employee_id,shift_id,score\n"
+        "E1,S1,2\n"
+        "E1,S1,-1\n"
+        "E2,S2,-5\n"
+        "E3,S1,1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.warns(RuntimeWarning):
+        prefs = loader.load_preferences(csv_path, employees, shifts)
+
+    assert len(prefs) == 2
+
+    s1_row = prefs[(prefs["employee_id"] == "E1") & (prefs["shift_id"] == "S1")]
+    assert not s1_row.empty
+    assert s1_row.iloc[0]["score"] == -1
+
+    s2_row = prefs[(prefs["employee_id"] == "E2") & (prefs["shift_id"] == "S2")]
+    assert not s2_row.empty
+    assert s2_row.iloc[0]["score"] == -2

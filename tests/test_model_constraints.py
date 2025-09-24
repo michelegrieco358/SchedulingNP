@@ -12,7 +12,11 @@ except ModuleNotFoundError:
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from model_cp import ShiftSchedulingCpSolver, SolverConfig  # noqa: E402
+from model_cp import (
+    ShiftSchedulingCpSolver,
+    SolverConfig,
+    DEFAULT_SHORTFALL_PRIORITY,
+)  # noqa: E402
 
 
 def test_rest_conflict_triggers_shortfall():
@@ -495,3 +499,78 @@ def test_shortfall_priority_increase_preserves_solution():
     }
 
     assert default_pairs == high_priority_pairs
+
+def test_preferences_steer_assignments():
+    employees = pd.DataFrame([
+        {
+            "employee_id": "E1",
+            "name": "Alice",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+        {
+            "employee_id": "E2",
+            "name": "Bob",
+            "roles": "front",
+            "max_week_hours": 40,
+            "min_rest_hours": 0,
+            "max_overtime_hours": 0,
+        },
+    ])
+
+    shifts = pd.DataFrame([
+        {
+            "shift_id": "S1",
+            "day": date(2025, 4, 1),
+            "start_dt": datetime(2025, 4, 1, 8, 0),
+            "end_dt": datetime(2025, 4, 1, 16, 0),
+            "duration_h": 8.0,
+            "role": "front",
+            "required_staff": 1,
+        }
+    ])
+
+    assign_mask = pd.DataFrame([
+        {"employee_id": "E1", "shift_id": "S1", "can_assign": 1},
+        {"employee_id": "E2", "shift_id": "S1", "can_assign": 1},
+    ])
+
+    preferences = pd.DataFrame([
+        {"employee_id": "E1", "shift_id": "S1", "score": 2},
+        {"employee_id": "E2", "shift_id": "S1", "score": -2},
+    ])
+
+    solver = ShiftSchedulingCpSolver(
+        employees=employees,
+        shifts=shifts,
+        assign_mask=assign_mask,
+        rest_conflicts=None,
+        overtime_costs=None,
+        preferences=preferences,
+        config=SolverConfig(
+            max_seconds=5,
+            log_search_progress=False,
+            fairness_weight=0,
+            overtime_priority=0,
+            preferences_weight=500,
+            shortfall_priority=DEFAULT_SHORTFALL_PRIORITY,
+        ),
+    )
+
+    solver.build()
+    result = solver.solve()
+
+    assert result.StatusName() == "OPTIMAL"
+
+    assignments = solver.extract_assignments(result)
+    assert set(assignments["employee_id"]) == {"E1"}
+    assert set(assignments["shift_id"]) == {"S1"}
+
+    pref_summary = solver.extract_preference_summary(result)
+    assert not pref_summary.empty
+    e1_row = pref_summary[pref_summary["employee_id"] == "E1"].iloc[0]
+    assert e1_row["liked_assigned"] == 1
+    assert e1_row["disliked_assigned"] == 0
+    assert e1_row["total_score"] == 2

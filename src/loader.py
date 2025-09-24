@@ -5,6 +5,7 @@ from datetime import datetime, time
 from dateutil import parser as dtparser
 
 import pandas as pd
+import warnings
 
 
 REQUIRED_EMP_COLS = ["employee_id", "name", "roles", "max_week_hours", "min_rest_hours", "max_overtime_hours"]
@@ -152,6 +153,55 @@ def load_overtime_costs(path: Path) -> pd.DataFrame:
         dups = df[df["role"].duplicated()]["role"].tolist()
         raise ValueError(f"{path.name}: role duplicati: {dups}")
 
+    return df
+
+
+def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFrame:
+    columns = ["employee_id", "shift_id", "score"]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    _ensure_columns(df, columns, path.name)
+
+    df = df[columns].copy()
+    df["employee_id"] = df["employee_id"].astype(str)
+    df["shift_id"] = df["shift_id"].astype(str)
+    df["score"] = pd.to_numeric(df["score"], errors="coerce")
+
+    if df["score"].isna().any():
+        rows = df[df["score"].isna()]
+        warnings.warn(
+            f"{path.name}: score non numerici scartati per {len(rows)} righe",
+            RuntimeWarning,
+        )
+        df = df[df["score"].notna()]
+
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df.loc[:, "score"] = df["score"].astype(int)
+    df.loc[:, "score"] = df["score"].clip(-2, 2)
+
+    valid_employees = set(employees["employee_id"].astype(str))
+    valid_shifts = set(shifts["shift_id"].astype(str))
+
+    mask_valid = df["employee_id"].isin(valid_employees) & df["shift_id"].isin(valid_shifts)
+    if not mask_valid.all():
+        invalid_count = (~mask_valid).sum()
+        warnings.warn(
+            f"{path.name}: scartate {invalid_count} righe con employee_id/shift_id non validi",
+            RuntimeWarning,
+        )
+        df = df[mask_valid]
+
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df = df.drop_duplicates(subset=["employee_id", "shift_id"], keep="last").reset_index(drop=True)
     return df
 
 def merge_availability(quali_mask: pd.DataFrame, availability: pd.DataFrame) -> pd.DataFrame:

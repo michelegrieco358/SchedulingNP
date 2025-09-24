@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import pandas as pd
 from ortools.sat.python import cp_model
@@ -25,6 +25,8 @@ DEFAULT_OVERTIME_PRIORITY = 1000
 DEFAULT_FAIRNESS_WEIGHT = 1
 DEFAULT_OVERTIME_COST_WEIGHT = 1000
 DEFAULT_SHORTFALL_PRIORITY = 2_000_000
+PREFERENCE_SCALE = 100
+DEFAULT_PREFERENCES_WEIGHT = 100
 DEFAULT_GLOBAL_OVERTIME_CAP_MINUTES = None
 
 @dataclass
@@ -35,6 +37,7 @@ class SolverConfig:
     global_min_rest_hours: float = DEFAULT_GLOBAL_MIN_REST_HOURS
     overtime_priority: int = DEFAULT_OVERTIME_PRIORITY
     shortfall_priority: int = DEFAULT_SHORTFALL_PRIORITY
+    preferences_weight: int = DEFAULT_PREFERENCES_WEIGHT
     fairness_weight: int = DEFAULT_FAIRNESS_WEIGHT
     default_overtime_cost_weight: int = DEFAULT_OVERTIME_COST_WEIGHT
     global_overtime_cap_minutes: int | None = None
@@ -48,6 +51,7 @@ class ShiftSchedulingCpSolver:
         assign_mask: pd.DataFrame,
         rest_conflicts: pd.DataFrame | None = None,
         overtime_costs: pd.DataFrame | None = None,
+        preferences: pd.DataFrame | None = None,
         config: SolverConfig | None = None,
     ) -> None:
         self.employees = employees
@@ -55,6 +59,7 @@ class ShiftSchedulingCpSolver:
         self.assign_mask = assign_mask
         self.rest_conflicts = rest_conflicts
         self.overtime_costs = overtime_costs
+        self.preferences = preferences
         self.config = config or SolverConfig()
 
         self.model = cp_model.CpModel()
@@ -67,11 +72,20 @@ class ShiftSchedulingCpSolver:
         self.shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_cost_weights: dict[str, int] = {}
+        self.preference_score_by_pair: Dict[Tuple[str, str], int] = {}
         self.global_overtime_cap_minutes: int | None = config.global_overtime_cap_minutes
         self.role_overtime_costs: dict[str, float] = {}
         self._night_shift_ids: set[str] = set()
         if overtime_costs is not None:
             self.role_overtime_costs = dict(zip(overtime_costs["role"], overtime_costs["overtime_cost_per_hour"]))
+
+        if preferences is not None and not preferences.empty:
+            self.preference_score_by_pair = {
+                (str(row["employee_id"]), str(row["shift_id"])): int(row["score"])
+                for _, row in preferences.iterrows()
+            }
+        else:
+            self.preference_score_by_pair = {}
 
     def build(self) -> None:
         """Costruisce variabili e vincoli base (placeholder)."""
@@ -321,6 +335,24 @@ class ShiftSchedulingCpSolver:
 
         return sum(terms), True
 
+    def _compute_preference_cost_expr(self):
+        if not self.assignment_vars:
+            return 0, False
+
+        terms = []
+        for (emp_id, shift_id), var in self.assignment_vars.items():
+            score = self.preference_score_by_pair.get((emp_id, shift_id), 0)
+            if score == 0:
+                continue
+            coeff = int(-score * PREFERENCE_SCALE)
+            if coeff != 0:
+                terms.append(coeff * var)
+
+        if not terms:
+            return 0, False
+
+        return sum(terms), True
+
     def _compute_fair_workload_expr(self):
         if not self.assignment_vars:
             return 0, False
@@ -367,9 +399,10 @@ class ShiftSchedulingCpSolver:
     def _set_objective(self) -> None:
         shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
         overtime_expr, has_overtime = self._compute_overtime_cost_expr()
+        pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
 
-        if not (has_shortfall or has_overtime or has_fairness):
+        if not (has_shortfall or has_overtime or has_pref or has_fairness):
             self.model.Minimize(0)
             return
 
@@ -378,6 +411,8 @@ class ShiftSchedulingCpSolver:
             terms.append(self.config.shortfall_priority * shortfall_expr)
         if has_overtime:
             terms.append(self.config.overtime_priority * overtime_expr)
+        if has_pref:
+            terms.append(self.config.preferences_weight * pref_expr)
         if has_fairness:
             terms.append(self.config.fairness_weight * fairness_expr)
 
@@ -500,6 +535,45 @@ class ShiftSchedulingCpSolver:
 
         return pd.DataFrame(rows, columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
 
+    def extract_preference_summary(self, solver: cp_model.CpSolver) -> pd.DataFrame:
+        """Riepiloga l'applicazione delle preferenze per dipendente."""
+        if not self.assignment_vars:
+            return pd.DataFrame(columns=["employee_id", "liked_assigned", "disliked_assigned", "total_score"])
+
+        rows = []
+        for emp_id in self.employees["employee_id"]:
+            pairs = self._vars_by_emp.get(emp_id, [])
+            if not pairs:
+                continue
+
+            liked = 0
+            disliked = 0
+            total_score = 0
+            for shift_id, var in pairs:
+                if not solver.Value(var):
+                    continue
+                score = self.preference_score_by_pair.get((emp_id, shift_id), 0)
+                total_score += score
+                if score > 0:
+                    liked += 1
+                elif score < 0:
+                    disliked += 1
+
+            if liked or disliked or total_score:
+                rows.append(
+                    {
+                        "employee_id": emp_id,
+                        "liked_assigned": liked,
+                        "disliked_assigned": disliked,
+                        "total_score": total_score,
+                    }
+                )
+
+        if not rows:
+            return pd.DataFrame(columns=["employee_id", "liked_assigned", "disliked_assigned", "total_score"])
+
+        return pd.DataFrame(rows, columns=["employee_id", "liked_assigned", "disliked_assigned", "total_score"])
+
     def log_employee_summary(self, solver: cp_model.CpSolver) -> None:
         """Logga minuti assegnati, straordinari e notti per dipendente (totali e per settimana)."""
         if not self._vars_by_emp:
@@ -565,10 +639,19 @@ def _load_data(
     shifts_norm = precompute.normalize_shift_times(shifts)
     quali_mask = loader.build_quali_mask(employees, shifts)
     assign_mask = loader.merge_availability(quali_mask, availability)
+    preferences_raw = loader.load_preferences(data_dir / "preferences.csv", employees, shifts)
+    assignable_pairs = assign_mask[assign_mask["can_assign"] == 1][["employee_id", "shift_id"]].drop_duplicates().copy()
+    preferences_filtered = assignable_pairs.merge(
+        preferences_raw, on=["employee_id", "shift_id"], how="left"
+    )
+    if not preferences_filtered.empty:
+        preferences_filtered["score"] = preferences_filtered["score"].fillna(0).astype(int)
+    else:
+        preferences_filtered = assignable_pairs.assign(score=0)
     rest_conflicts = precompute.conflict_pairs_for_rest(shifts_norm, global_min_rest_hours)
     overtime_costs = loader.load_overtime_costs(data_dir / "overtime_costs.csv")
 
-    return employees, shifts_norm, availability, assign_mask, rest_conflicts, overtime_costs
+    return employees, shifts_norm, availability, assign_mask, rest_conflicts, overtime_costs, preferences_filtered
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -580,6 +663,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--global-rest-hours", type=float, default=None, help="Soglia globale di riposo minimo (ore)")
     parser.add_argument("--overtime-priority", type=int, default=None, help="Peso per penalizzare lo straordinario")
     parser.add_argument("--fairness-weight", type=int, default=None, help="Peso per la fairness nel carico di lavoro")
+    parser.add_argument("--preferences-weight", type=int, default=None, help="Peso per le preferenze di assegnazione")
     parser.add_argument("--default-ot-weight", type=int, default=None, help="Peso predefinito per costo straordinario se il ruolo manca")
     parser.add_argument("--global-ot-cap-hours", type=float, default=None, help="Tetto settimanale globale di straordinari (ore)")
     args = parser.parse_args(argv)
@@ -594,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         global_min_rest_hours=args.global_rest_hours if args.global_rest_hours is not None else DEFAULT_GLOBAL_MIN_REST_HOURS,
         overtime_priority=args.overtime_priority if args.overtime_priority is not None else DEFAULT_OVERTIME_PRIORITY,
         fairness_weight=args.fairness_weight if args.fairness_weight is not None else DEFAULT_FAIRNESS_WEIGHT,
+        preferences_weight=args.preferences_weight if args.preferences_weight is not None else DEFAULT_PREFERENCES_WEIGHT,
         default_overtime_cost_weight=args.default_ot_weight if args.default_ot_weight is not None else DEFAULT_OVERTIME_COST_WEIGHT,
         global_overtime_cap_minutes=global_ot_cap_minutes,
     )
@@ -605,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         assign_mask,
         rest_conflicts,
         overtime_costs,
+        preferences,
     ) = _load_data(args.data_dir, config.global_min_rest_hours)
 
     solver = ShiftSchedulingCpSolver(
@@ -613,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
         assign_mask=assign_mask,
         rest_conflicts=rest_conflicts,
         overtime_costs=overtime_costs,
+        preferences=preferences,
         config=config,
     )
     solver.build()
@@ -641,6 +728,11 @@ def main(argv: list[str] | None = None) -> int:
     if not shortfall_df.empty:
         print("\nShortfall turni scoperti:")
         print(shortfall_df.to_string(index=False))
+
+    preference_df = solver.extract_preference_summary(cp_solver)
+    if not preference_df.empty:
+        print("\nPreferenze assegnate:")
+        print(preference_df.to_string(index=False))
 
     solver.log_employee_summary(cp_solver)
 
