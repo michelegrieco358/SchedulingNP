@@ -41,12 +41,18 @@ class SkillsConfig(BaseModel):
     enable_slack: bool = True
 
 
+class ShiftsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preserve_shift_integrity: bool = True
+
+
 
 
 class WindowsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    coverage_mode: str = Field("disabled")
+    coverage_mode: str = Field("adaptive_slots")  # Default cambiato per preserve_shift_integrity
     enable_slot_slack: bool = True
     warn_slots_threshold: int = Field(500, ge=0)
     hard_slots_threshold: int = Field(2000, ge=0)
@@ -137,6 +143,7 @@ class Config(BaseModel):
     hours: HoursConfig = Field(default_factory=HoursConfig)
     rest: RestConfig = Field(default_factory=RestConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    shifts: ShiftsConfig = Field(default_factory=ShiftsConfig)
     windows: WindowsConfig = Field(default_factory=WindowsConfig)
     penalties: PenaltiesConfig = Field(default_factory=PenaltiesConfig)
     objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)
@@ -216,4 +223,3 @@ def _collect_missing(defaults: Dict[str, Any], provided: Dict[str, Any], prefix:
         if isinstance(default_value, dict) and isinstance(provided_value, dict):
             missing.extend(_collect_missing(default_value, provided_value, full_key))
     return missing
-

@@ -6,6 +6,8 @@ rest:
   min_between_shifts: 8
 skills:
   enable_slack: true
+shifts:
+  preserve_shift_integrity: true
 penalties:
   unmet_window: 2.0
   unmet_demand: 1.0
