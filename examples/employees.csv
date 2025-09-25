@@ -1,0 +1,9 @@
+employee_id,name,roles,max_week_hours,min_rest_hours,max_overtime_hours,skills
+E1,Alice Johnson,nurse|triage,40,8,10,"first_aid,leadership,customer_service"
+E2,Bob Smith,nurse,40,8,8,"first_aid,icu"
+E3,Carol Davis,doctor,48,10,12,"surgery,icu,emergency"
+E4,David Wilson,nurse,32,8,6,"first_aid,pediatrics"
+E5,Eva Martinez,doctor|emergency,40,10,10,"emergency,trauma,leadership"
+E6,Frank Brown,nurse,24,8,4,"first_aid"
+E7,Grace Lee,triage|nurse,36,8,8,"customer_service,first_aid,languages"
+E8,Henry Taylor,doctor,44,10,8,"surgery,anesthesia"

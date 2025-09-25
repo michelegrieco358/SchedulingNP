@@ -38,7 +38,7 @@ def test_load_shifts_skill_requirements_json(tmp_path):
                 "start": "08:00",
                 "end": "16:00",
                 "role": "front",
-                "required_staff": 3,
+                "demand": 3,
                 "skill_requirements": req,
             }
         ]
@@ -51,7 +51,7 @@ def test_load_shifts_skill_requirements_json(tmp_path):
 
 
 def test_load_shifts_skill_requirements_short_form(tmp_path):
-    csv_content = """shift_id,day,start,end,role,required_staff,skill_requirements
+    csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,2,"muletto=1, primo=1"
 """
     path = tmp_path / "shifts.csv"
@@ -63,7 +63,7 @@ S1,2025-01-01,08:00,16:00,front,2,"muletto=1, primo=1"
 
 
 def test_load_shifts_skill_requirements_negative(tmp_path):
-    csv_content = """shift_id,day,start,end,role,required_staff,skill_requirements
+    csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,1,"muletto=-1"
 """
     path = tmp_path / "shifts.csv"
@@ -74,7 +74,7 @@ S1,2025-01-01,08:00,16:00,front,1,"muletto=-1"
 
 
 def test_skill_requirements_warn_if_exceed_demand(tmp_path):
-    csv_content = """shift_id,day,start,end,role,required_staff,skill_requirements
+    csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,1,"muletto=1,primo=1"
 """
     path = tmp_path / "shifts.csv"

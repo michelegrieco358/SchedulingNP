@@ -28,7 +28,18 @@ OBJECTIVE_MINUTE_SCALE = 6000
 OVERTIME_COST_SCALE = 100
 
 
+def _weight_per_hour_to_minutes(weight_hour: float | int | None) -> float:
+    """Converte peso da persona-ora a persona-minuto per obiettivo unificato."""
+    if weight_hour is None:
+        return 0.0
+    value = float(weight_hour)
+    if value <= 0:
+        return 0.0
+    # Conversione diretta: peso_per_minuto = peso_per_ora / 60
+    return value / 60.0
+
 def _weight_per_hour_to_int(weight_hour: float | int | None) -> int:
+    """Legacy: converte peso da persona-ora a intero scalato (per compatibilità)."""
     if weight_hour is None:
         return 0
     value = float(weight_hour)
@@ -118,6 +129,11 @@ class ShiftSchedulingCpSolver:
         config: SolverConfig | None = None,
         objective_priority: Sequence[str] | None = None,
         objective_weights: Mapping[str, int] | None = None,
+        # Nuovi parametri per slot adattivi
+        adaptive_slot_data: object | None = None,
+        slots_in_window: Mapping[str, Sequence[str]] | None = None,
+        coverage_mode: str = "disabled",
+        enable_slot_slack: bool = True,
     ) -> None:
         self.employees = employees
         self.shifts = shifts
@@ -185,6 +201,7 @@ class ShiftSchedulingCpSolver:
 
         self.model = cp_model.CpModel()
         self.assignment_vars: Dict[Tuple[str, str], cp_model.IntVar] = {}
+        self.shift_aggregate_vars: Dict[str, cp_model.IntVar] = {}  # y[s] = sum_e x[e,s]
         self.duration_minutes: Dict[str, int] = {}
         self.total_required_minutes: int = 0
         self.workload_dev_vars: list[cp_model.IntVar] = []
@@ -222,13 +239,30 @@ class ShiftSchedulingCpSolver:
         else:
             self.preference_score_by_pair = {}
 
+        # Parametri per slot adattivi (STEP 3B)
+        self.adaptive_slot_data = adaptive_slot_data
+        self.slots_in_window = {str(k): list(v) for k, v in (slots_in_window or {}).items()}
+        self.coverage_mode = str(coverage_mode).lower()
+        self.enable_slot_slack = bool(enable_slot_slack)
+        
+        # Variabili per vincoli di slot
+        self.slot_shortfall_vars: dict[tuple[str, str], cp_model.IntVar] = {}  # short_slot[w,t]
+        self.slot_to_covering_shifts: dict[str, list[str]] = {}  # Mappa precomputata slot -> turni che lo coprono
+        
+        # STEP 4A: Pesi obiettivo in persona-minuti (conversione da persona-ora)
+        self.objective_weights_minutes: dict[str, float] = {}
+        self.slot_minutes: dict[str, int] = {}  # Durata slot in minuti per termini finestra
+        self.mean_shift_minutes: int = 60  # Media durate turni per preferenze
+
     def build(self) -> None:
         """Costruisce variabili e vincoli base (placeholder)."""
         self._build_assignment_variables()
+        self._build_shift_aggregate_variables()
         self._add_shift_coverage_constraints()
         self._add_window_coverage_constraints()
         self._add_shift_soft_demand_constraints()
         self._add_skill_coverage_constraints()
+        self._add_adaptive_slot_coverage_constraints()  # STEP 3B: Vincoli slot adattivi
         self.duration_minutes = self._compute_shift_duration_minutes()
         if self.duration_minutes:
             avg_minutes = sum(self.duration_minutes.values()) / len(self.duration_minutes)
@@ -236,6 +270,11 @@ class ShiftSchedulingCpSolver:
         else:
             self.avg_shift_minutes = 60
         self.total_required_minutes = self._compute_total_required_minutes()
+        
+        # STEP 4A: Inizializza pesi in persona-minuti e durate per obiettivo unificato
+        self._initialize_objective_weights_minutes()
+        self._compute_slot_minutes()
+        self.mean_shift_minutes = self.avg_shift_minutes  # Per preferenze
         self._add_employee_max_hours_constraints()
         self._add_one_shift_per_day_constraints()
         self._add_night_shift_constraints()
@@ -260,6 +299,27 @@ class ShiftSchedulingCpSolver:
             self._vars_by_shift.setdefault(shift_id, []).append(var)
             self._vars_by_shift_emp.setdefault(shift_id, []).append((emp_id, var))
             self._vars_by_emp.setdefault(emp_id, []).append((shift_id, var))
+
+    def _build_shift_aggregate_variables(self) -> None:
+        """Crea variabili aggregate y[s] = sum_e x[e,s] per ogni turno."""
+        self.shift_aggregate_vars.clear()
+        
+        for _, shift_row in self.shifts.iterrows():
+            shift_id = shift_row["shift_id"]
+            vars_for_shift = self._vars_by_shift.get(shift_id, [])
+            
+            # Upper bound: numero di dipendenti eleggibili per questo turno
+            ub_s = len(vars_for_shift)
+            
+            # Crea variabile aggregata y[s]
+            y_var = self.model.NewIntVar(0, ub_s, f"y__{shift_id}")
+            self.shift_aggregate_vars[shift_id] = y_var
+            
+            # Vincolo di definizione: y[s] == sum_e x[e,s]
+            if vars_for_shift:
+                self.model.Add(y_var == sum(vars_for_shift))
+            else:
+                self.model.Add(y_var == 0)
 
     def _add_shift_coverage_constraints(self) -> None:
         """Gestisce la copertura dei turni consentendo scoperture penalizzate."""
@@ -311,11 +371,12 @@ class ShiftSchedulingCpSolver:
         for shift_id, demand in self.shift_soft_demands.items():
             if demand <= 0:
                 continue
-            vars_for_shift = self._vars_by_shift.get(shift_id, [])
+            # Usa la variabile aggregata y[s] invece di sum(x[e,s])
+            y_var = self.shift_aggregate_vars.get(shift_id)
             slack = self.model.NewIntVar(0, demand, f"short_shift_soft__{shift_id}")
             self.shift_soft_shortfall_vars[shift_id] = slack
-            if vars_for_shift:
-                self.model.Add(sum(vars_for_shift) + slack >= demand)
+            if y_var is not None:
+                self.model.Add(y_var + slack >= demand)
             else:
                 self.model.Add(slack >= demand)
 
@@ -353,6 +414,108 @@ class ShiftSchedulingCpSolver:
                 else:
                     self.model.Add(assign_expr >= req)
 
+    def _add_adaptive_slot_coverage_constraints(self) -> None:
+        """Implementa vincoli di copertura istantanea per slot adattivi (STEP 3B)."""
+        self.slot_shortfall_vars = {}
+        
+        # Solo se coverage_mode == "adaptive_slots" e ci sono finestre e slot
+        if self.coverage_mode != "adaptive_slots":
+            return
+            
+        if not self.slots_in_window or not self.adaptive_slot_data:
+            return
+            
+        # Precomputa mappa slot -> turni che lo coprono per ottimizzazione
+        self._precompute_slot_to_shifts_mapping()
+        
+        slot_count = 0
+        constraint_count = 0
+        
+        # Per ogni finestra w e per ogni slot t ∈ slots_in_window[w]
+        for window_id, slot_ids in self.slots_in_window.items():
+            if window_id not in self.window_demands:
+                continue
+                
+            window_demand = self.window_demands[window_id]
+            if window_demand <= 0:
+                continue
+                
+            for slot_id in slot_ids:
+                slot_count += 1
+                
+                # Trova turni che coprono questo slot
+                covering_shifts = self.slot_to_covering_shifts.get(slot_id, [])
+                
+                # Somma delle variabili aggregate y[s] per turni che coprono lo slot
+                covering_y_vars = []
+                for shift_id in covering_shifts:
+                    y_var = self.shift_aggregate_vars.get(shift_id)
+                    if y_var is not None:
+                        covering_y_vars.append(y_var)
+                
+                # Crea variabile di slack se abilitata
+                if self.enable_slot_slack:
+                    slack_var = self.model.NewIntVar(0, window_demand, f"short_slot__{window_id}__{slot_id}")
+                    self.slot_shortfall_vars[(window_id, slot_id)] = slack_var
+                    
+                    # Vincolo: ∑_{turni s che coprono t} y[s] + short_slot[w,t] >= window_demand[w]
+                    if covering_y_vars:
+                        self.model.Add(sum(covering_y_vars) + slack_var >= window_demand)
+                    else:
+                        self.model.Add(slack_var >= window_demand)
+                else:
+                    # Vincolo hard: ∑_{turni s che coprono t} y[s] >= window_demand[w]
+                    if covering_y_vars:
+                        self.model.Add(sum(covering_y_vars) >= window_demand)
+                    # Se non ci sono turni che coprono lo slot, il vincolo è impossibile
+                    # ma questo dovrebbe essere già stato rilevato nel precompute
+                
+                constraint_count += 1
+        
+        if slot_count > 0:
+            logger.info(
+                "Vincoli slot adattivi: %d finestre, %d slot, %d vincoli (slack: %s)",
+                len(self.slots_in_window),
+                slot_count,
+                constraint_count,
+                "abilitato" if self.enable_slot_slack else "disabilitato"
+            )
+
+    def _precompute_slot_to_shifts_mapping(self) -> None:
+        """Precomputa mappa slot -> turni che coprono lo slot per ottimizzazione."""
+        self.slot_to_covering_shifts = {}
+        
+        if not self.adaptive_slot_data:
+            return
+            
+        # Accede ai dati degli slot adattivi
+        try:
+            segments_of_s = getattr(self.adaptive_slot_data, 'segments_of_s', {})
+            cover_segment = getattr(self.adaptive_slot_data, 'cover_segment', {})
+            
+            # Per ogni slot, trova tutti i turni che lo coprono
+            for window_id, slot_ids in self.slots_in_window.items():
+                for slot_id in slot_ids:
+                    covering_shifts = []
+                    
+                    # Controlla ogni turno per vedere se copre questo slot
+                    for shift_id in self.shift_aggregate_vars.keys():
+                        shift_segments = segments_of_s.get(str(shift_id), [])
+                        
+                        # Un turno copre uno slot se almeno uno dei suoi segmenti copre interamente lo slot
+                        for segment_id in shift_segments:
+                            if cover_segment.get((segment_id, slot_id), 0) == 1:
+                                covering_shifts.append(shift_id)
+                                break  # Basta un segmento che copre lo slot
+                    
+                    self.slot_to_covering_shifts[slot_id] = covering_shifts
+                    
+        except AttributeError as e:
+            logger.warning("Errore nell'accesso ai dati slot adattivi: %s", e)
+            # Fallback: nessun turno copre alcuno slot
+            for window_id, slot_ids in self.slots_in_window.items():
+                for slot_id in slot_ids:
+                    self.slot_to_covering_shifts[slot_id] = []
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
         """Pre-calcola la durata di ogni turno in minuti interi."""
@@ -940,6 +1103,300 @@ class ShiftSchedulingCpSolver:
             ))
             print(f"  settimane: {weeks_str}")
 
+    def verify_aggregate_variables(self, solver: cp_model.CpSolver) -> bool:
+        """Verifica che y[s] = sum_e x[e,s] per ogni turno."""
+        all_correct = True
+        
+        for shift_id, y_var in self.shift_aggregate_vars.items():
+            y_value = solver.Value(y_var)
+            
+            # Calcola la somma delle variabili x[e,s] per questo turno
+            vars_for_shift = self._vars_by_shift.get(shift_id, [])
+            x_sum = sum(solver.Value(var) for var in vars_for_shift)
+            
+            if y_value != x_sum:
+                print(f"[ERROR] Turno {shift_id}: y[s]={y_value} != sum(x[e,s])={x_sum}")
+                all_correct = False
+            else:
+                print(f"[OK] Turno {shift_id}: y[s]={y_value} == sum(x[e,s])={x_sum}")
+        
+        return all_correct
+
+    def _initialize_objective_weights_minutes(self) -> None:
+        """STEP 4A: Inizializza pesi obiettivo in persona-minuti da config (persona-ora)."""
+        self.objective_weights_minutes = {}
+        
+        # Legge i pesi dalla configurazione (interpretati come persona-ora) e converte
+        penalties_config = {
+            "unmet_window": BASE_WINDOW_WEIGHT_H,
+            "unmet_demand": BASE_SHIFT_WEIGHT_H,
+            "unmet_skill": BASE_SKILL_WEIGHT_H,
+            "unmet_shift": BASE_SHIFT_SOFT_WEIGHT_H,
+            "overtime": BASE_OVERTIME_WEIGHT_H,
+            "fairness": BASE_FAIRNESS_WEIGHT_H,
+            "preferences": BASE_PREFERENCES_WEIGHT_H,
+        }
+        
+        # Converte da persona-ora a persona-minuto
+        for key, weight_per_hour in penalties_config.items():
+            weight_per_minute = _weight_per_hour_to_minutes(weight_per_hour)
+            if weight_per_minute > 0:
+                self.objective_weights_minutes[key] = weight_per_minute
+        
+        logger.info(
+            "Pesi obiettivo (persona-minuto): %s",
+            {k: f"{v:.4f}" for k, v in self.objective_weights_minutes.items()}
+        )
+
+    def _compute_slot_minutes(self) -> None:
+        """STEP 4A: Calcola durate slot in minuti per termini finestra."""
+        self.slot_minutes = {}
+        
+        if not self.adaptive_slot_data:
+            return
+            
+        try:
+            slot_bounds = getattr(self.adaptive_slot_data, 'slot_bounds', {})
+            
+            for window_id, slot_ids in self.slots_in_window.items():
+                for slot_id in slot_ids:
+                    if slot_id in slot_bounds:
+                        start_min, end_min = slot_bounds[slot_id]
+                        duration = max(1, int(end_min - start_min))
+                        self.slot_minutes[slot_id] = duration
+                    else:
+                        # Fallback: usa durata media turni
+                        self.slot_minutes[slot_id] = self.avg_shift_minutes
+                        
+        except AttributeError as e:
+            logger.warning("Errore nel calcolo durate slot: %s", e)
+            # Fallback: tutti gli slot hanno durata media turni
+            for window_id, slot_ids in self.slots_in_window.items():
+                for slot_id in slot_ids:
+                    self.slot_minutes[slot_id] = self.avg_shift_minutes
+        
+        if self.slot_minutes:
+            total_slots = len(self.slot_minutes)
+            avg_slot_duration = sum(self.slot_minutes.values()) / total_slots
+            logger.info(
+                "Durate slot: %d slot, media %.1f min (range: %d-%d min)",
+                total_slots,
+                avg_slot_duration,
+                min(self.slot_minutes.values()) if self.slot_minutes else 0,
+                max(self.slot_minutes.values()) if self.slot_minutes else 0
+            )
+
+    def extract_objective_breakdown(self, solver: cp_model.CpSolver) -> dict[str, dict[str, float]]:
+        """STEP 4B: Calcola breakdown dettagliato dell'obiettivo per componente."""
+        breakdown = {}
+        
+        # 1. Finestre (slot adattivi)
+        window_minutes = 0
+        window_cost = 0.0
+        if self.coverage_mode == "adaptive_slots" and self.slot_shortfall_vars:
+            weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
+            for (window_id, slot_id), var in self.slot_shortfall_vars.items():
+                shortfall_units = solver.Value(var)
+                if shortfall_units > 0:
+                    slot_duration = self.slot_minutes.get(slot_id, self.avg_shift_minutes)
+                    minutes = shortfall_units * slot_duration
+                    window_minutes += minutes
+                    window_cost += minutes * weight_per_min
+        
+        breakdown["unmet_window"] = {
+            "minutes": window_minutes,
+            "cost": window_cost,
+            "weight_per_min": self.objective_weights_minutes.get("unmet_window", 0.0)
+        }
+        
+        # 2. Turni (shortfall hard)
+        shift_minutes = 0
+        shift_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("unmet_demand", 0.0)
+        for shift_id, var in self.shortfall_vars.items():
+            shortfall_units = solver.Value(var)
+            if shortfall_units > 0:
+                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+                minutes = shortfall_units * shift_duration
+                shift_minutes += minutes
+                shift_cost += minutes * weight_per_min
+        
+        breakdown["unmet_demand"] = {
+            "minutes": shift_minutes,
+            "cost": shift_cost,
+            "weight_per_min": weight_per_min
+        }
+        
+        # 3. Skill shortfall
+        skill_minutes = 0
+        skill_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("unmet_skill", 0.0)
+        for (shift_id, skill_name), var in self.skill_shortfall_vars.items():
+            shortfall_units = solver.Value(var)
+            if shortfall_units > 0:
+                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+                minutes = shortfall_units * shift_duration
+                skill_minutes += minutes
+                skill_cost += minutes * weight_per_min
+        
+        breakdown["unmet_skill"] = {
+            "minutes": skill_minutes,
+            "cost": skill_cost,
+            "weight_per_min": weight_per_min
+        }
+        
+        # 4. Turni soft (demand minima)
+        shift_soft_minutes = 0
+        shift_soft_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("unmet_shift", 0.0)
+        for shift_id, var in self.shift_soft_shortfall_vars.items():
+            shortfall_units = solver.Value(var)
+            if shortfall_units > 0:
+                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+                minutes = shortfall_units * shift_duration
+                shift_soft_minutes += minutes
+                shift_soft_cost += minutes * weight_per_min
+        
+        breakdown["unmet_shift"] = {
+            "minutes": shift_soft_minutes,
+            "cost": shift_soft_cost,
+            "weight_per_min": weight_per_min
+        }
+        
+        # 5. Straordinari
+        overtime_minutes = 0
+        overtime_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("overtime", 0.0)
+        for emp_id, var in self.overtime_vars.items():
+            ot_minutes = solver.Value(var)
+            if ot_minutes > 0:
+                overtime_minutes += ot_minutes
+                overtime_cost += ot_minutes * weight_per_min
+        
+        breakdown["overtime"] = {
+            "minutes": overtime_minutes,
+            "cost": overtime_cost,
+            "weight_per_min": weight_per_min
+        }
+        
+        # 6. Preferenze (violazioni pesate)
+        pref_violations = 0
+        pref_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("preferences", 0.0)
+        for (emp_id, shift_id), var in self.assignment_vars.items():
+            if solver.Value(var):
+                score = self.preference_score_by_pair.get((emp_id, shift_id), 0)
+                if score < 0:  # Solo violazioni (preferenze negative)
+                    pref_violations += abs(score)
+                    # Costo = |score| * mean_shift_minutes * weight_per_min
+                    pref_cost += abs(score) * self.mean_shift_minutes * weight_per_min
+        
+        breakdown["preferences"] = {
+            "violations": pref_violations,
+            "cost": pref_cost,
+            "weight_per_min": weight_per_min,
+            "mean_shift_minutes": self.mean_shift_minutes
+        }
+        
+        # 7. Fairness (deviazioni workload)
+        fairness_deviations = 0
+        fairness_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("fairness", 0.0)
+        for var in self.workload_dev_vars:
+            deviation = solver.Value(var)
+            if deviation > 0:
+                fairness_deviations += deviation
+                fairness_cost += deviation * weight_per_min
+        
+        breakdown["fairness"] = {
+            "deviations_minutes": fairness_deviations,
+            "cost": fairness_cost,
+            "weight_per_min": weight_per_min
+        }
+        
+        return breakdown
+
+    def log_objective_breakdown(self, solver: cp_model.CpSolver) -> None:
+        """STEP 4B: Log compatto del breakdown obiettivo post-solve."""
+        breakdown = self.extract_objective_breakdown(solver)
+        
+        print("\n=== Breakdown Obiettivo (persona-minuti) ===")
+        total_cost = 0.0
+        
+        for component, data in breakdown.items():
+            cost = data.get("cost", 0.0)
+            total_cost += cost
+            
+            if component == "preferences":
+                violations = data.get("violations", 0)
+                mean_min = data.get("mean_shift_minutes", 0)
+                print(f"- {component:12}: {violations:3d} violazioni × {mean_min:3d}min = {cost:8.4f}")
+            elif component == "fairness":
+                dev_min = data.get("deviations_minutes", 0)
+                print(f"- {component:12}: {dev_min:6.0f} dev-min = {cost:8.4f}")
+            else:
+                minutes = data.get("minutes", 0)
+                print(f"- {component:12}: {minutes:6.0f} min = {cost:8.4f}")
+        
+        print(f"- {'TOTALE':12}: {total_cost:8.4f}")
+        
+        # Top-5 componenti più costosi
+        sorted_components = sorted(
+            [(k, v.get("cost", 0.0)) for k, v in breakdown.items()],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        top_5 = [f"{comp}({cost:.3f})" for comp, cost in sorted_components[:5] if cost > 0]
+        if top_5:
+            print(f"Top-5 costi: {', '.join(top_5)}")
+
+    def export_objective_breakdown_csv(self, solver: cp_model.CpSolver, output_path: Path) -> None:
+        """STEP 4B: Export breakdown obiettivo in CSV."""
+        breakdown = self.extract_objective_breakdown(solver)
+        
+        # Crea directory se non esiste
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        rows = []
+        for component, data in breakdown.items():
+            row = {
+                "component": component,
+                "cost": data.get("cost", 0.0),
+                "weight_per_min": data.get("weight_per_min", 0.0),
+            }
+            
+            if component == "preferences":
+                row.update({
+                    "violations": data.get("violations", 0),
+                    "mean_shift_minutes": data.get("mean_shift_minutes", 0),
+                    "minutes": data.get("violations", 0) * data.get("mean_shift_minutes", 0)
+                })
+            elif component == "fairness":
+                row.update({
+                    "deviations_minutes": data.get("deviations_minutes", 0),
+                    "minutes": data.get("deviations_minutes", 0)
+                })
+            else:
+                row.update({
+                    "minutes": data.get("minutes", 0)
+                })
+            
+            rows.append(row)
+        
+        # Aggiungi riga totale
+        total_cost = sum(data.get("cost", 0.0) for data in breakdown.values())
+        total_minutes = sum(row.get("minutes", 0) for row in rows)
+        rows.append({
+            "component": "TOTAL",
+            "cost": total_cost,
+            "minutes": total_minutes,
+            "weight_per_min": 0.0
+        })
+        
+        df = pd.DataFrame(rows)
+        df.to_csv(output_path, index=False, float_format="%.6f")
+        print(f"Breakdown obiettivo salvato in {output_path}")
+
 
 def _load_data(
     data_dir: Path,
@@ -1246,6 +1703,20 @@ def main(argv: list[str] | None = None) -> int:
         print(preference_df.to_string(index=False))
 
     solver.log_employee_summary(cp_solver)
+
+    # STEP 4B: Breakdown obiettivo dettagliato
+    solver.log_objective_breakdown(cp_solver)
+    
+    # Export CSV breakdown se richiesto (opzionale)
+    breakdown_csv_path = Path("reports") / "objective_breakdown.csv"
+    solver.export_objective_breakdown_csv(cp_solver, breakdown_csv_path)
+
+    # Verifica che le variabili aggregate y[s] siano corrette
+    print("\n=== Verifica variabili aggregate y[s] ===")
+    if solver.verify_aggregate_variables(cp_solver):
+        print("✓ Tutte le variabili aggregate sono corrette: y[s] = sum_e x[e,s]")
+    else:
+        print("✗ Errore nelle variabili aggregate!")
 
     return 0
 

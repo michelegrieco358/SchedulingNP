@@ -1,18 +1,23 @@
 # Shift Scheduling CP-SAT
 
-Pianificatore turni basato su **OR-Tools CP-SAT**.
+Pianificatore turni avanzato basato su **OR-Tools CP-SAT** con supporto per **finestre istantanee** e **slot adattivi**.
 
-- **Input**: dipendenti, turni, disponibilità, costi di straordinario, preferenze soft e time-off hard.
-- **Output**: assegnazioni turno-dipendente che rispettano i vincoli operativi, minimizzano gli shortfall e, a cascata, ottimizzano straordinari, preferenze e fairness.
+- **Input**: dipendenti, turni, disponibilità, costi di straordinario, preferenze soft, time-off hard e **finestre di copertura istantanea**.
+- **Output**: assegnazioni turno-dipendente che rispettano i vincoli operativi, garantiscono copertura istantanea per finestre critiche, minimizzano gli shortfall e ottimizzano straordinari, preferenze e fairness.
+- **Novità**: Sistema di **slot adattivi** per copertura granulare, **skill requirements** per turno, **obiettivo unificato** in persona-minuti.
 
-> **Stato attuale:** modello su orizzonte settimanale; l'estensione multi-periodo resta in roadmap.
+> **Stato attuale:** modello su orizzonte settimanale con finestre istantanee; l'estensione multi-periodo resta in roadmap.
 
 ---
 
 ## Indice
 
 - [Caratteristiche](#caratteristiche)
-- [Funzione obiettivo (persona-ora)](#funzione-obiettivo-persona-ora)
+- [Finestre istantanee con slot adattivi](#finestre-istantanee-con-slot-adattivi)
+- [Schema CSV e migrazione](#schema-csv-e-migrazione)
+- [Feature flags e configurazione](#feature-flags-e-configurazione)
+- [Funzione obiettivo (persona-minuti)](#funzione-obiettivo-persona-minuti)
+- [Quick start](#quick-start)
 - [Installazione](#installazione)
 - [Dati di input (CSV)](#dati-di-input-csv)
 - [Esecuzione](#esecuzione)
@@ -24,10 +29,201 @@ Pianificatore turni basato su **OR-Tools CP-SAT**.
 
 ---
 
+## Finestre istantanee con slot adattivi
+
+Il sistema supporta **copertura istantanea** tramite finestre temporali che garantiscono un numero minimo di persone contemporaneamente presenti in specifici intervalli orari.
+
+### **Come funziona**
+1. **Definizione finestre**: `windows.csv` specifica intervalli (es. 07:00-11:00) con domanda minima per ruolo
+2. **Generazione slot**: Il precompute crea automaticamente slot temporali adattivi basati sui turni esistenti
+3. **Vincoli istantanei**: Ogni slot deve avere copertura ≥ domanda finestra (con slack opzionale)
+4. **Ottimizzazione**: Violazioni pesate in base alla durata dello slot (persona-minuti)
+
+### **Vantaggi vs Legacy**
+- **Granularità fine**: Copertura per slot di 15-30-60 min invece di aggregati giornalieri
+- **Flessibilità**: Finestre di durata variabile e sovrapposte
+- **Precisione**: Garantisce copertura istantanea, non solo somme giornaliere
+- **Performance**: Slot precomputati e variabili aggregate y[s] per efficienza
+
+### **Esempio pratico**
+```
+Finestra: WIN_NURSE_MORNING_RUSH (07:00-11:00, domanda=3)
+Turni:    S1_MORNING (06:00-14:00), S1_EVENING (14:00-22:00)
+Slot:     [07:00-14:00] coperto da S1_MORNING
+Vincolo:  persone_in_slot[07:00-14:00] ≥ 3
+```
+
+---
+
+## Schema CSV e migrazione
+
+### **Nuovo schema (raccomandato)**
+Il nuovo schema supporta skill requirements e finestre istantanee:
+
+```csv
+# shifts.csv (nuovo)
+shift_id,day,start,end,role,demand,skill_requirements
+S1_NURSE_MORNING,2025-10-07,06:00,14:00,nurse,2,"first_aid=1"
+```
+
+```csv
+# windows.csv (nuovo)
+window_id,day,window_start,window_end,role,window_demand
+WIN_NURSE_RUSH,2025-10-07,07:00,11:00,nurse,3
+```
+
+### **Schema legacy (supportato)**
+Il sistema mantiene compatibilità con il formato precedente:
+
+```csv
+# shifts.csv (legacy)
+shift_id,day,start,end,role,required_staff,demand_id
+S1_NURSE_MORNING,2025-10-07,06:00,14:00,nurse,2,WIN_MORNING
+
+# demand_windows.csv (legacy)
+demand_id,window_start,window_end,role,window_demand
+WIN_MORNING,07:00,11:00,nurse,3
+```
+
+### **Guida migrazione**
+1. **Mantieni i file esistenti** per continuità
+2. **Aggiungi `windows.csv`** per finestre istantanee
+3. **Aggiungi colonna `skill_requirements`** in `shifts.csv` se necessario
+4. **Configura `coverage_mode: "adaptive_slots"`** per attivare le nuove funzionalità
+5. **Testa gradualmente** confrontando risultati legacy vs nuovo schema
+
+---
+
+## Feature flags e configurazione
+
+### **Configurazione finestre**
+```yaml
+windows:
+  coverage_mode: "adaptive_slots"    # "disabled" | "adaptive_slots"
+  enable_slot_slack: true            # Permette violazioni con penalità
+  warn_slots_threshold: 100          # Warning se slot > soglia
+  hard_slots_threshold: 500          # Errore se slot > soglia
+  midnight_policy: "split"           # "split" | "exclude"
+```
+
+### **Feature flags principali**
+- **`coverage_mode`**: 
+  - `"disabled"`: Solo vincoli legacy (demand_windows.csv)
+  - `"adaptive_slots"`: Finestre istantanee con slot adattivi
+- **`enable_slot_slack`**: 
+  - `true`: Violazioni finestre penalizzate ma permesse
+  - `false`: Vincoli hard, fallimento se impossibili
+- **`midnight_policy`**:
+  - `"split"`: Turni cross-midnight divisi in segmenti
+  - `"exclude"`: Turni cross-midnight esclusi dalle finestre
+
+### **Soglie performance**
+- **`warn_slots_threshold`**: Avviso se troppi slot generati
+- **`hard_slots_threshold`**: Blocco esecuzione per evitare esplosione combinatoriale
+
+---
+
+## Funzione obiettivo (persona-minuti)
+
+Il sistema usa un **obiettivo unificato in persona-minuti** per stabilità numerica e coerenza semantica.
+
+### **Conversione automatica**
+I pesi in configurazione sono espressi in **persona-ora** (user-friendly) e convertiti automaticamente:
+```yaml
+penalties:
+  unmet_window: 2.0      # 2.0 €/persona-ora → 0.033 €/persona-minuto
+  overtime: 0.30         # 0.30 €/persona-ora → 0.005 €/persona-minuto
+```
+
+### **Termini obiettivo**
+```
+Minimizza:
+  2.0/60 * Σ(slot_minutes[t] * short_slot[w,t])     # Finestre
++ 1.0/60 * Σ(shift_minutes[s] * short_shift[s])     # Turni
++ 0.8/60 * Σ(shift_minutes[s] * short_skill[s,k])   # Skill
++ 0.3/60 * Σ(overtime_minutes[e])                   # Straordinari
++ 0.33/60 * Σ(violations * mean_shift_minutes)      # Preferenze
++ 0.05/60 * Σ(fairness_deviations_minutes)          # Fairness
+```
+
+### **Vantaggi**
+- **Stabilità numerica**: Coefficienti bilanciati (decine vs migliaia)
+- **Coerenza semantica**: Tutti i termini in stessa unità
+- **Granularità**: Slot di durata variabile pesati correttamente
+- **Interpretabilità**: Costi direttamente confrontabili
+
+---
+
+## Quick start
+
+### **1. Esempio rapido**
+```bash
+# Clona e installa
+git clone <repo-url>
+cd shift-scheduling
+pip install -r requirements.txt
+
+# Esegui esempio con finestre istantanee
+python -m src.model_cp --config examples/config.yaml --data-dir examples --max-seconds 30
+
+# Visualizza risultati
+cat reports/objective_breakdown.csv
+```
+
+### **2. Esempio passo-passo**
+```bash
+# 1. Valida i dati
+python -m src.loader --data-dir examples
+
+# 2. Esegui ottimizzazione
+python -m src.model_cp \
+  --config examples/config.yaml \
+  --data-dir examples \
+  --max-seconds 60 \
+  --output results/assignments.csv
+
+# 3. Analizza breakdown costi
+echo "=== Breakdown obiettivo ==="
+cat reports/objective_breakdown.csv
+
+# 4. Verifica copertura finestre
+grep "WIN_" results/assignments.csv
+```
+
+### **3. Personalizzazione**
+```bash
+# Modifica pesi (preferenze > straordinari)
+python -m src.model_cp \
+  --data-dir examples \
+  --preferences-weight 0.5 \
+  --overtime-priority 0.2 \
+  --max-seconds 60
+
+# Disabilita finestre (modalità legacy)
+python -m src.model_cp \
+  --data-dir data \
+  --config config_legacy.yaml \
+  --max-seconds 60
+```
+
+### **4. Output atteso**
+```
+=== Breakdown Obiettivo (persona-minuti) ===
+- unmet_window:    120 min =   4.0000
+- unmet_demand:     60 min =   1.0000  
+- preferences :      3 violazioni × 480min =   0.8000
+- TOTALE      :   5.8000
+Top-5 costi: unmet_window(4.000), unmet_demand(1.000), preferences(0.800)
+
+Breakdown obiettivo salvato in reports/objective_breakdown.csv
+```
+
+---
+
 ## Caratteristiche
 
 - **Copertura turni hard**: ogni turno richiede esattamente `required_staff`; se i candidati non bastano interviene lo shortfall (penalizzato fortemente).
-- **Domanda aggregata per finestra**: `demand_windows.csv` impone la copertura minima per fasce orarie/ruolo con slack pesantemente penalizzato.
+- **Domanda aggregata per finestra**: il loader supporta sia il nuovo `windows.csv` (slot adattivi) sia il legacy `demand_windows.csv`, imponendo la copertura minima per fasce orarie/ruolo con slack pesantemente penalizzato.
 - **Disponibilita hard**: `availability.csv` definisce le coppie consentite (missing e disponibile di default).
 - **Time-off hard**: `time_off.csv` blocca qualsiasi sovrapposizione turno/assenza (full day o parziale, con supporto overnight).
 - **Riposi minimi e regole notte**: vieta notti consecutive e limita a tre le notti per settimana ISO.
@@ -89,6 +285,8 @@ pip install -U ortools pandas python-dateutil
 
 Mettere i CSV in `data/` (o passa `--data-dir`).
 
+> **Nota transizione:** `load_shifts` accetta sia lo schema legacy (colonna `required_staff`) sia il nuovo schema basato su `demand` e `skill_requirements`; il loader sceglie automaticamente il mapping più coerente e mette a disposizione `load_data_bundle` per ottenere una vista normalizzata dei dati.
+
 ### `employees.csv`
 
 | colonna             | tipo  | descrizione                                       |
@@ -110,12 +308,26 @@ Mettere i CSV in `data/` (o passa `--data-dir`).
 | start          | time | `HH:MM`                                                                     |
 | end            | time | `HH:MM` (se `end <= start` indica turno cross-midnight)                     |
 | role           | str  | ruolo richiesto                                                             |
-| required_staff | int  | numero di persone richieste                                                 |
-| demand         | int  | opzionale: domanda minima per il turno (soft, default = 0)                  |
-| demand_id      | str  | opzionale: identifica la finestra in `demand_windows.csv`                   |
-| skill_requirements | str  | opzionale: requisiti di skill (`{{"muletto":1}}` oppure `muletto=1,primo=1`) |
+| required_staff | int  | (legacy) minimo hard per turno; se assente viene rimpiazzato da `demand` |
+| demand         | int  | domanda minima soft; se la colonna manca viene usato `required_staff`      |
+| demand_id      | str  | legacy: identifica la finestra in `demand_windows.csv`                      |
+| skill_requirements | str  | opzionale: requisiti di skill (`{{"muletto":1}}` o `muletto=1,primo=1`)    |
 
 > Il pre-processing genera `start_dt`, `end_dt` e `duration_h`, gestendo i casi cross-midnight.
+### `windows.csv` (nuovo schema)
+
+| colonna        | tipo | descrizione                                                                |
+|----------------|------|----------------------------------------------------------------------------|
+| window_id      | str  | id finestra (es. `WIN_DAY_1`)                                              |
+| day            | date | `YYYY-MM-DD`                                                               |
+| window_start   | time | `HH:MM` (accetta `24:00` come fine giornata)                               |
+| window_end     | time | `HH:MM`, deve essere maggiore di `window_start`                           |
+| role           | str  | ruolo cui si applica la finestra                                          |
+| window_demand  | int  | numero minimo di persone contemporanee richieste nella finestra           |
+
+> Se `windows.csv` manca il loader mantiene la modalità legacy, logga un warning e forza `config.windows.coverage_mode = "disabled"`.
+> Il file `demand_windows.csv` resta supportato come fallback per compatibilità retroattiva.
+
 ### `availability.csv`
 
 | colonna      | tipo | descrizione                               |

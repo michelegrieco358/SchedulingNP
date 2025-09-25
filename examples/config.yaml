@@ -1,0 +1,46 @@
+hours:
+  min_weekly: 0
+  max_weekly: 40
+  max_daily: 8
+
+rest:
+  min_between_shifts: 8
+
+skills:
+  enable_slack: true
+
+windows:
+  coverage_mode: "adaptive_slots"
+  enable_slot_slack: true
+  warn_slots_threshold: 100
+  hard_slots_threshold: 500
+  midnight_policy: "split"
+
+penalties:
+  unmet_window: 2.0
+  unmet_demand: 1.0
+  unmet_skill: 0.8
+  unmet_shift: 0.6
+  overtime: 0.30
+  preferences: 0.33
+  fairness: 0.05
+
+objective:
+  priority:
+    - unmet_window
+    - unmet_demand
+    - unmet_skill
+    - unmet_shift
+    - overtime
+    - preferences
+    - fairness
+
+random:
+  seed: 42
+
+solver:
+  time_limit_sec: 60
+  mip_gap: null
+
+logging:
+  level: INFO

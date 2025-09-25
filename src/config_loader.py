@@ -41,16 +41,54 @@ class SkillsConfig(BaseModel):
     enable_slack: bool = True
 
 
+
+
+class WindowsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage_mode: str = Field("disabled")
+    enable_slot_slack: bool = True
+    warn_slots_threshold: int = Field(500, ge=0)
+    hard_slots_threshold: int = Field(2000, ge=0)
+    midnight_policy: str = Field("split")
+
+    @field_validator("coverage_mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        modes = {"disabled", "adaptive_slots"}
+        value = value.strip().lower()
+        if value not in modes:
+            raise ValueError(f"coverage_mode deve essere uno tra {sorted(modes)}")
+        return value
+
+    @field_validator("midnight_policy")
+    @classmethod
+    def validate_midnight_policy(cls, value: str) -> str:
+        policies = {"split", "exclude"}
+        value = value.strip().lower()
+        if value not in policies:
+            raise ValueError(f"midnight_policy deve essere uno tra {sorted(policies)}")
+        return value
+
+    @model_validator(mode="after")
+    def check_thresholds(cls, values: "WindowsConfig") -> "WindowsConfig":
+        warn = values.warn_slots_threshold
+        hard = values.hard_slots_threshold
+        if hard is not None and warn is not None and hard < warn:
+            raise ValueError("hard_slots_threshold deve essere >= warn_slots_threshold")
+        return values
+
+
 class PenaltiesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     unmet_window: float = Field(2.0, ge=0)
     unmet_demand: float = Field(1.0, ge=0)
     unmet_skill: float = Field(0.8, ge=0)
-    unmet_shift: float = Field(0.6, ge=0)
-    overtime: float = Field(0.3, ge=0)
+    unmet_shift: float = Field(1.0, ge=0)
+    overtime: float = Field(0.30, ge=0)
     fairness: float = Field(0.05, ge=0)
-    preferences: float = Field(0.05, ge=0)
+    preferences: float = Field(0.33, ge=0)
 
 
 class ObjectiveConfig(BaseModel):
@@ -99,6 +137,7 @@ class Config(BaseModel):
     hours: HoursConfig = Field(default_factory=HoursConfig)
     rest: RestConfig = Field(default_factory=RestConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    windows: WindowsConfig = Field(default_factory=WindowsConfig)
     penalties: PenaltiesConfig = Field(default_factory=PenaltiesConfig)
     objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)
     random: RandomConfig = Field(default_factory=RandomConfig)

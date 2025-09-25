@@ -1,4 +1,4 @@
-shift_id,day,start,end,role,required_staff
+shift_id,day,start,end,role,demand
 S1_N1,2025-09-29,08:00,16:00,nurse,1
 S1_N2,2025-09-29,16:00,00:00,nurse,1
 S1_D1,2025-09-29,08:00,20:00,doctor,1

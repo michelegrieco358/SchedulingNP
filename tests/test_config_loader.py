@@ -18,10 +18,14 @@ def test_load_config_defaults(tmp_path, monkeypatch):
     assert cfg.penalties.unmet_window == 2.0
     assert cfg.penalties.unmet_demand == 1.0
     assert cfg.penalties.unmet_skill == 0.8
-    assert cfg.penalties.unmet_shift == 0.6
+    assert cfg.penalties.unmet_shift == 1.0
+    assert cfg.penalties.overtime == 0.30
+    assert cfg.penalties.preferences == 0.33
     assert cfg.skills.enable_slack is True
+    assert cfg.windows.coverage_mode == "disabled"
+    assert cfg.windows.warn_slots_threshold == 500
+    assert cfg.windows.midnight_policy == "split"
     assert list(cfg.objective.priority) == list(config_loader.PRIORITY_KEYS)
-
 
 def test_load_config_partial(tmp_path, monkeypatch, caplog):
     monkeypatch.chdir(tmp_path)
@@ -35,9 +39,10 @@ def test_load_config_partial(tmp_path, monkeypatch, caplog):
     assert cfg.penalties.unmet_window == 2.0
     assert cfg.penalties.unmet_demand == 1.0  # default
     assert cfg.penalties.unmet_skill == 0.8
-    assert cfg.penalties.unmet_shift == 0.6
+    assert cfg.penalties.unmet_shift == 1.0
+    assert cfg.penalties.preferences == 0.33
+    assert cfg.windows.coverage_mode == "disabled"
     assert any("valori mancanti" in record.message for record in caplog.records)
-
 
 def test_load_config_invalid_type(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -47,7 +52,6 @@ def test_load_config_invalid_type(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         config_loader.load_config()
 
-
 def test_load_config_invalid_hours(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg_path = tmp_path / "config.yaml"
@@ -55,7 +59,6 @@ def test_load_config_invalid_hours(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         config_loader.load_config()
-
 
 def test_load_config_invalid_priority(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

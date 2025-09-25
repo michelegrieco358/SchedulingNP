@@ -1,6 +1,8 @@
 import argparse
 import sys
 import json
+import logging
+from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from dateutil import parser as dtparser
@@ -8,9 +10,14 @@ from dateutil import parser as dtparser
 import pandas as pd
 import warnings
 
+from src.time_utils import normalize_2400, parse_hhmm_to_min
+
+
+logger = logging.getLogger(__name__)
 
 REQUIRED_EMP_COLS = ["employee_id", "name", "roles", "max_week_hours", "min_rest_hours", "max_overtime_hours"]
-REQUIRED_SHIFT_COLS = ["shift_id", "day", "start", "end", "role", "required_staff"]
+SHIFT_BASE_COLS = ["shift_id", "day", "start", "end", "role"]
+WINDOW_BASE_COLS = ["window_id", "day", "window_start", "window_end", "role", "window_demand"]
 REQUIRED_AVAIL_COLS = ["employee_id", "shift_id", "is_available"]
 
 
@@ -21,12 +28,22 @@ def _ensure_columns(df: pd.DataFrame, required_cols: list, name: str):
         raise ValueError(f"{name}: colonne mancanti: {missing}")
 
 
-def _parse_time_hhmm(s: str) -> time:
-    """Parsa 'HH:MM' in datetime.time. Raise error se formato non valido."""
+def _parse_time_hhmm(value: str | time) -> time:
+    """Parsa un orario in formato HH:MM in ``datetime.time``."""
+    if isinstance(value, time):
+        return value
     try:
-        return dtparser.parse(s).time()
-    except Exception as e:
-        raise ValueError(f"Orario non valido '{s}' (atteso HH:MM)") from e
+        minutes = parse_hhmm_to_min(str(value))
+    except ValueError as exc:
+        raise ValueError(f"Orario non valido '{value}' (atteso HH:MM)") from exc
+    return _minutes_to_time(minutes)
+
+
+def _minutes_to_time(minutes: int) -> time:
+    minutes = normalize_2400(int(minutes))
+    if minutes == 1440:
+        return time(0, 0)
+    return time(minutes // 60, minutes % 60)
 
 
 def _parse_date_iso(s: str) -> datetime.date:
@@ -35,6 +52,21 @@ def _parse_date_iso(s: str) -> datetime.date:
         return dtparser.isoparse(s).date()
     except Exception as e:
         raise ValueError(f"Data non valida '{s}' (atteso YYYY-MM-DD)") from e
+
+
+def _compute_duration_minutes(start_min: int, end_min: int, shift_id: str) -> int:
+    start_min = normalize_2400(int(start_min))
+    end_min = normalize_2400(int(end_min))
+    if end_min == start_min:
+        if end_min in (0, 1440):
+            return 1440
+        raise ValueError(f"shifts.csv: turno {shift_id} ha stesso orario di inizio/fine ({start_min}) non ammesso")
+    duration = end_min - start_min
+    if duration <= 0:
+        duration += 1440
+    if duration <= 0:
+        raise ValueError(f"shifts.csv: durata calcolata non valida per {shift_id}")
+    return duration
 
 
 def _parse_skill_list(value: str) -> set[str]:
@@ -47,7 +79,7 @@ def _parse_skill_list(value: str) -> set[str]:
     return set(tokens)
 
 
-def _parse_skill_requirements(raw_value, shift_id: str, required_staff: int) -> dict[str, int]:
+def _parse_skill_requirements(raw_value, shift_id: str, capacity_hint: int) -> dict[str, int]:
     if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
         return {}
     text_value = str(raw_value).strip()
@@ -88,11 +120,13 @@ def _parse_skill_requirements(raw_value, shift_id: str, required_staff: int) -> 
             normalized[skill_name] = qty_int
 
     total_req = sum(normalized.values())
-    if total_req > required_staff:
-        warnings.warn(
-            f"shifts.csv: skill_requirements per {shift_id} sommano {total_req} > required_staff {required_staff}",
-            RuntimeWarning,
-        )
+    if capacity_hint is not None:
+        limit = max(1, int(capacity_hint))
+        if total_req > limit:
+            warnings.warn(
+                f"shifts.csv: skill_requirements per {shift_id} sommano {total_req} > capacità di riferimento {limit}",
+                RuntimeWarning,
+            )
     return normalized
 
 
@@ -138,43 +172,74 @@ def load_employees(path: Path) -> pd.DataFrame:
 
 def load_shifts(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    _ensure_columns(df, REQUIRED_SHIFT_COLS, "shifts.csv")
+    _ensure_columns(df, SHIFT_BASE_COLS, "shifts.csv")
 
-    # tipi/parse
-    df["shift_id"] = df["shift_id"].astype(str)
+    original_cols = set(df.columns)
+
+    df["shift_id"] = df["shift_id"].astype(str).str.strip()
+    if df["shift_id"].duplicated().any():
+        dups = df[df["shift_id"].duplicated()]["shift_id"].tolist()
+        raise ValueError(f"shifts.csv: shift_id duplicati: {dups}")
+
     df["day"] = df["day"].apply(_parse_date_iso)
-    df["start"] = df["start"].apply(_parse_time_hhmm)
-    df["end"] = df["end"].apply(_parse_time_hhmm)
-    df["role"] = df["role"].astype(str)
-    df["required_staff"] = pd.to_numeric(df["required_staff"], errors="raise").astype(int)
+    df["start_min"] = df["start"].apply(parse_hhmm_to_min)
+    df["end_min"] = df["end"].apply(parse_hhmm_to_min)
+    df["start"] = df["start_min"].apply(_minutes_to_time)
+    df["end"] = df["end_min"].apply(_minutes_to_time)
+    df["role"] = df["role"].astype(str).str.strip()
 
-    if "skill_requirements" not in df.columns:
-        df["skill_requirements"] = ""
-    df["skill_requirements"] = df["skill_requirements"].fillna("")
-    df["skill_requirements"] = df.apply(
-        lambda row: _parse_skill_requirements(row["skill_requirements"], row["shift_id"], int(row["required_staff"])),
-        axis=1,
-    )
-
-    if "demand" not in df.columns:
-        df["demand"] = 0
+    # Only 'demand' field is supported in v2.0+
+    if "demand" not in original_cols:
+        raise ValueError("shifts.csv: 'demand' column is required. Legacy 'required_staff' is no longer supported.")
+    
+    if "required_staff" in original_cols:
+        raise ValueError("shifts.csv: 'required_staff' field is no longer supported. Use 'demand' instead.")
+    
     df["demand"] = pd.to_numeric(df["demand"], errors="coerce").fillna(0).astype(int)
     if (df["demand"] < 0).any():
         raise ValueError("shifts.csv: demand deve essere >= 0")
+    
+    # Set required_staff = demand for internal consistency
+    df["required_staff"] = df["demand"]
+
+    if "skill_requirements" not in original_cols:
+        df["skill_requirements"] = ""
+    df["skill_requirements"] = df["skill_requirements"].fillna("")
+    df["skill_requirements"] = df.apply(
+        lambda row: _parse_skill_requirements(
+            row["skill_requirements"],
+            row["shift_id"],
+            int(max(row["demand"], row["required_staff"], 0)),
+        ),
+        axis=1,
+    )
+
+    df["crosses_midnight"] = df["end_min"] <= df["start_min"]
+    df["duration_minutes"] = df.apply(
+        lambda row: _compute_duration_minutes(row["start_min"], row["end_min"], row["shift_id"]),
+        axis=1,
+    )
+    
+    # Add duration_h for solver compatibility
+    df["duration_h"] = df["duration_minutes"] / 60.0
+    
+    # Add start_dt and end_dt for solver compatibility
+    df["start_dt"] = pd.to_datetime(df["day"].astype(str) + " " + df["start"].astype(str))
+    df["end_dt"] = pd.to_datetime(df["day"].astype(str) + " " + df["end"].astype(str))
+    
+    # Handle midnight crossing for end_dt
+    midnight_mask = df["crosses_midnight"]
+    df.loc[midnight_mask, "end_dt"] = df.loc[midnight_mask, "end_dt"] + pd.Timedelta(days=1)
 
     if "demand_id" not in df.columns:
         df["demand_id"] = ""
     df["demand_id"] = df["demand_id"].fillna("").astype(str).str.strip()
 
-    if df["shift_id"].duplicated().any():
-        dups = df[df["shift_id"].duplicated()]["shift_id"].tolist()
-        raise ValueError(f"shifts.csv: shift_id duplicati: {dups}")
-
-    if (df["required_staff"] <= 0).any():
-        raise ValueError("shifts.csv: required_staff deve essere >= 1")
-
-    # controllo orari (accettiamo end=00:00 come 'fine a mezzanotte')
-    # Non calcoliamo ancora la durata: sarà fatto in precompute (step successivo).
+    summary = (
+        f"shifts.csv: caricati {len(df)} turni, ruoli: {sorted(df['role'].unique())}, "
+        f"domanda media: {df['demand'].mean():.2f}"
+    )
+    logger.info(summary)
     return df
 
 
@@ -294,38 +359,69 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
 
 
 
-def load_demand_windows(path: Path) -> pd.DataFrame:
-    columns = ["demand_id", "window_start", "window_end", "role", "window_demand"]
+def load_windows(
+    path: Path,
+    shifts: pd.DataFrame | None = None,
+    *,
+    config: object | None = None,
+) -> pd.DataFrame:
+    "Carica windows.csv (nuovo schema) restituendo colonne normalizzate in minuti."
+    extended_cols = WINDOW_BASE_COLS + ["window_start_min", "window_end_min", "window_minutes"]
     if not path.exists():
-        return pd.DataFrame(columns=columns)
+        logger.warning("%s non trovato: copertura finestre disabilitata (modalita legacy)", path.name)
+        if config is not None and hasattr(config, "windows"):
+            try:
+                if getattr(config.windows, "coverage_mode", "disabled") != "disabled":
+                    config.windows.coverage_mode = "disabled"
+            except AttributeError:
+                pass
+        return pd.DataFrame(columns=extended_cols)
 
     df = pd.read_csv(path)
-    _ensure_columns(df, columns, path.name)
+    if df.empty:
+        logger.warning("%s vuoto: nessuna finestra caricata", path.name)
+        return pd.DataFrame(columns=extended_cols)
+
+    _ensure_columns(df, WINDOW_BASE_COLS, path.name)
 
     df = df.copy()
-    df["demand_id"] = df["demand_id"].astype(str).str.strip()
-    df = df[df["demand_id"] != ""]
-
+    df["window_id"] = df["window_id"].astype(str).str.strip()
+    df = df[df["window_id"] != ""]
     if df.empty:
-        return pd.DataFrame(columns=columns)
+        logger.warning("%s: tutte le finestre prive di identificativo valido sono state scartate", path.name)
+        return pd.DataFrame(columns=extended_cols)
 
-    df["role"] = df["role"].astype(str)
-    df["window_start"] = df["window_start"].apply(_parse_time_hhmm)
-    df["window_end"] = df["window_end"].apply(_parse_time_hhmm)
-    df["window_demand"] = pd.to_numeric(df["window_demand"], errors="raise").astype(int)
+    if df["window_id"].duplicated().any():
+        warnings.warn("windows.csv: window_id duplicati, mantengo l'ultima occorrenza", RuntimeWarning)
+        df = df.drop_duplicates(subset="window_id", keep="last")
+
+    df["day"] = df["day"].apply(_parse_date_iso)
+    df["window_start_min"] = df["window_start"].apply(parse_hhmm_to_min)
+    df["window_end_min"] = df["window_end"].apply(parse_hhmm_to_min)
+    df["window_start"] = df["window_start_min"].apply(_minutes_to_time)
+    df["window_end"] = df["window_end_min"].apply(_minutes_to_time)
+    df["role"] = df["role"].astype(str).str.strip()
+    df["window_demand"] = pd.to_numeric(df["window_demand"], errors="coerce").fillna(0).astype(int)
 
     if (df["window_demand"] < 0).any():
         raise ValueError(f"{path.name}: window_demand deve essere >= 0")
 
-    if df["demand_id"].duplicated().any():
-        warnings.warn(
-            f"{path.name}: demand_id duplicati, verra mantenuta l'ultima occorrenza",
-            RuntimeWarning,
-        )
-        df = df.drop_duplicates(subset="demand_id", keep="last")
+    invalid_bounds = df["window_end_min"] <= df["window_start_min"]
+    if invalid_bounds.any():
+        bad_ids = df.loc[invalid_bounds, "window_id"].tolist()
+        raise ValueError(f"{path.name}: window_end deve essere maggiore di window_start per {bad_ids}")
 
-    df.reset_index(drop=True, inplace=True)
-    return df[columns]
+    df["window_minutes"] = df["window_end_min"] - df["window_start_min"]
+
+    if shifts is not None and not shifts.empty:
+        known_roles = set(shifts["role"].astype(str).str.strip())
+        unknown_roles = sorted(set(df["role"]) - known_roles)
+        if unknown_roles:
+            raise ValueError(f"{path.name}: ruoli sconosciuti {unknown_roles}")
+
+    df = df.sort_values(["day", "window_start_min", "window_id"]).reset_index(drop=True)
+    logger.info("%s: caricate %d finestre (ruoli: %s)", path.name, len(df), sorted(df["role"].unique()))
+    return df[extended_cols]
 
 
 def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
@@ -479,6 +575,87 @@ def merge_availability(quali_mask: pd.DataFrame, availability: pd.DataFrame) -> 
 
     merged["can_assign"] = (merged["qual_ok"] & merged["is_available"]).astype(int)
     return merged[["employee_id", "shift_id", "can_assign", "qual_ok", "is_available"]]
+
+
+
+def load_data_bundle(data_dir: Path, *, config: object | None = None, shifts_only_mode: bool = False) -> SimpleNamespace:
+    """Carica i dataset con la nuova architettura (v2.0+)."""
+    data_dir = Path(data_dir)
+
+    # windows.csv is required unless in shifts-only mode
+    windows_path = data_dir / "windows.csv"
+    if not windows_path.exists() and not shifts_only_mode:
+        raise FileNotFoundError(
+            f"windows.csv is required in {data_dir}. "
+            f"Use shifts_only_mode=True if you only need shift-based scheduling without window coverage."
+        )
+
+    employees = load_employees(data_dir / "employees.csv")
+    shifts = load_shifts(data_dir / "shifts.csv")
+    availability = load_availability(data_dir / "availability.csv", employees, shifts)
+
+    quali_mask = build_quali_mask(employees, shifts)
+    assign_mask = merge_availability(quali_mask, availability)
+
+    time_off = load_time_off(data_dir / "time_off.csv", employees)
+    preferences = load_preferences(data_dir / "preferences.csv", employees, shifts)
+    windows_df = load_windows(data_dir / "windows.csv", shifts, config=config)
+
+    shift_duration_minutes = {
+        str(row.shift_id): int(row.duration_minutes)
+        for row in shifts.itertuples()
+    }
+    shift_records = {
+        str(row.shift_id): {
+            "day": row.day,
+            "role": row.role,
+            "start_min": int(row.start_min),
+            "end_min": int(row.end_min),
+            "crosses_midnight": bool(row.crosses_midnight),
+            "demand": int(row.demand),
+            "required_staff": int(row.required_staff),
+            "skill_req": dict(row.skill_requirements) if isinstance(row.skill_requirements, dict) else {},
+        }
+        for row in shifts.itertuples()
+    }
+
+    window_records = {
+        str(row.window_id): {
+            "day": row.day,
+            "role": row.role,
+            "start_min": int(row.window_start_min),
+            "end_min": int(row.window_end_min),
+            "window_minutes": int(row.window_minutes),
+            "window_demand": int(row.window_demand),
+        }
+        for row in windows_df.itertuples()
+    }
+
+    emp_skills = {
+        str(row.employee_id): set(row.skills_set)
+        for row in employees.itertuples()
+    }
+    eligible = {
+        (str(row.employee_id), str(row.shift_id)): bool(row.can_assign)
+        for row in assign_mask.itertuples()
+    }
+
+    bundle = SimpleNamespace(
+        employees_df=employees,
+        shifts_df=shifts,
+        availability_df=availability,
+        quali_mask_df=quali_mask,
+        assign_mask_df=assign_mask,
+        time_off_df=time_off,
+        preferences_df=preferences,
+        windows_df=windows_df,
+        shifts=shift_records,
+        windows=window_records,
+        shift_duration_minutes=shift_duration_minutes,
+        emp_skills=emp_skills,
+        eligible=eligible,
+    )
+    return bundle
 
 
 def summarize(employees: pd.DataFrame, shifts: pd.DataFrame, av_mask: pd.DataFrame):

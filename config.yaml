@@ -11,9 +11,9 @@ penalties:
   unmet_demand: 1.0
   unmet_skill: 0.8
   unmet_shift: 0.6
-  overtime: 0.3
+  overtime: 0.30
+  preferences: 0.33
   fairness: 0.05
-  preferences: 0.05
 objective:
   priority:
     - unmet_window
