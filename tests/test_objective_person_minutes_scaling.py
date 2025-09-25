@@ -70,6 +70,7 @@ def test_slot_minutes_calculation():
     
     window_demands = {"WIN_TEST": 1}
     slots_in_window = {"WIN_TEST": ["SLOT_SHORT", "SLOT_LONG"]}
+    shift_soft_demands = {}  # Aggiunto per correggere l'errore
     
     class MockSlotData:
         def __init__(self):
@@ -90,8 +91,10 @@ def test_slot_minutes_calculation():
         adaptive_slot_data=MockSlotData(),
         slots_in_window=slots_in_window,
         window_demands=window_demands,
+        shift_soft_demands=shift_soft_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per test scaling
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -137,6 +140,7 @@ def test_objective_scaling_consistency():
         shift_soft_demands=shift_soft_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per test scaling
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -305,6 +309,7 @@ def test_slot_duration_cost_scaling(slot_duration, expected_cost_ratio):
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per test scaling
         config=SolverConfig(max_seconds=5.0)
     )
     

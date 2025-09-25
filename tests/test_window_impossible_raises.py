@@ -42,6 +42,7 @@ def test_window_no_covering_shifts_with_slack():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,  # Con slack dovrebbe funzionare
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -145,6 +146,7 @@ def test_window_missing_from_demands():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per test window impossible
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -237,6 +239,7 @@ def test_adaptive_slot_data_missing():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     

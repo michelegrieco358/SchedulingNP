@@ -115,6 +115,7 @@ def _make_solver(
         config=cfg,
         objective_priority=priority,
         objective_weights=objective_weights,
+        preserve_shift_integrity=False,  # Usa modalità legacy per test window coverage
     )
     solver.build()
     cp_solver = solver.solve()
@@ -171,4 +172,3 @@ def test_shift_soft_demand_creates_penalized_slack():
     assert cp_solver.StatusName() == "OPTIMAL"
     assert cp_solver.Value(solver.shift_soft_shortfall_vars["S1"]) == 1
     assert cp_solver.Value(solver.shortfall_vars["S1"]) == 0
-

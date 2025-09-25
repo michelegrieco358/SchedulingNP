@@ -93,6 +93,7 @@ def _solve(skill_map, shift_req, slack_enabled, demand_id: str | None = None, wi
         window_shifts=window_shifts,
         shift_soft_demands=shift_soft_demands,
         config=cfg,
+        preserve_shift_integrity=False,  # Usa modalità legacy per test skill con finestre
     )
     solver.build()
     cp_solver = solver.solve()
@@ -150,4 +151,3 @@ def test_skill_requirement_respected_with_window():
     assert cp_solver.Value(solver.assignment_vars[("E1", "S1")]) == 1
     assert cp_solver.Value(solver.assignment_vars[("E2", "S1")]) == 0
     assert cp_solver.Value(solver.window_shortfall_vars["W1"]) == 0
-

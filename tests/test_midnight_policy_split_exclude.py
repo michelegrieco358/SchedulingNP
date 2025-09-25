@@ -54,6 +54,7 @@ def test_midnight_policy_split():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -113,6 +114,7 @@ def test_midnight_policy_exclude():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -178,6 +180,7 @@ def test_regular_shift_not_affected_by_midnight_policy():
             window_demands=window_demands,
             coverage_mode="adaptive_slots",
             enable_slot_slack=True,
+            preserve_shift_integrity=False,  # Usa modalità slot per questo test
             config=SolverConfig(max_seconds=5.0)
         )
         
@@ -250,6 +253,7 @@ def test_multiple_midnight_shifts():
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -310,6 +314,7 @@ def test_midnight_policy_parametrized(policy, expected_coverage):
         window_demands=window_demands,
         coverage_mode="adaptive_slots",
         enable_slot_slack=True,
+        preserve_shift_integrity=False,  # Usa modalità slot per questo test
         config=SolverConfig(max_seconds=5.0)
     )
     
