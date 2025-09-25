@@ -1,5 +1,6 @@
 import argparse
 import sys
+import json
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from dateutil import parser as dtparser
@@ -36,6 +37,68 @@ def _parse_date_iso(s: str) -> datetime.date:
         raise ValueError(f"Data non valida '{s}' (atteso YYYY-MM-DD)") from e
 
 
+def _parse_skill_list(value: str) -> set[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return set()
+    text = str(value).strip()
+    if not text:
+        return set()
+    tokens = [item.strip() for item in text.split(',') if item and item.strip()]
+    return set(tokens)
+
+
+def _parse_skill_requirements(raw_value, shift_id: str, required_staff: int) -> dict[str, int]:
+    if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+        return {}
+    text_value = str(raw_value).strip()
+    if not text_value:
+        return {}
+
+    if text_value.startswith('{'):
+        try:
+            parsed_obj = json.loads(text_value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"shifts.csv: skill_requirements JSON non valido per {shift_id}: {text_value}") from exc
+        if not isinstance(parsed_obj, dict):
+            raise ValueError(f"shifts.csv: skill_requirements per {shift_id} deve essere un oggetto")
+        items = list(parsed_obj.items())
+    else:
+        items = []
+        for chunk in text_value.split(','):
+            part = chunk.strip()
+            if not part:
+                continue
+            if '=' not in part:
+                raise ValueError(f"shifts.csv: skill_requirements per {shift_id} deve usare key=value")
+            key, value_part = part.split('=', 1)
+            items.append((key, value_part))
+
+    normalized: dict[str, int] = {}
+    for key, value in items:
+        skill_name = str(key).strip()
+        if not skill_name:
+            raise ValueError(f"shifts.csv: skill vuota nel turno {shift_id}")
+        try:
+            qty_int = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"shifts.csv: valore non intero per skill {skill_name} del turno {shift_id}: {value}") from exc
+        if qty_int < 0:
+            raise ValueError(f"shifts.csv: valore negativo per skill {skill_name} del turno {shift_id}")
+        if qty_int > 0:
+            normalized[skill_name] = qty_int
+
+    total_req = sum(normalized.values())
+    if total_req > required_staff:
+        warnings.warn(
+            f"shifts.csv: skill_requirements per {shift_id} sommano {total_req} > required_staff {required_staff}",
+            RuntimeWarning,
+        )
+    return normalized
+
+
+
+
+
 def load_employees(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     _ensure_columns(df, REQUIRED_EMP_COLS, "employees.csv")
@@ -54,6 +117,11 @@ def load_employees(path: Path) -> pd.DataFrame:
         raise ValueError(f"employees.csv: employee_id duplicati: {dups}")
 
     # crea colonna di variabili tipo set che indicano i ruoli di ogni dipendente
+    if "skills" not in df.columns:
+        df["skills"] = ""
+    df["skills"] = df["skills"].fillna("").astype(str)
+    df["skills_set"] = df["skills"].apply(_parse_skill_list)
+
     df["roles_set"] = df["roles"].apply(lambda s: set([p.strip() for p in s.split("|") if p.strip() != ""]))
     df["primary_role"] = df["roles"].apply(lambda s: s.split("|")[0].strip() if s else "")
 
@@ -79,6 +147,24 @@ def load_shifts(path: Path) -> pd.DataFrame:
     df["end"] = df["end"].apply(_parse_time_hhmm)
     df["role"] = df["role"].astype(str)
     df["required_staff"] = pd.to_numeric(df["required_staff"], errors="raise").astype(int)
+
+    if "skill_requirements" not in df.columns:
+        df["skill_requirements"] = ""
+    df["skill_requirements"] = df["skill_requirements"].fillna("")
+    df["skill_requirements"] = df.apply(
+        lambda row: _parse_skill_requirements(row["skill_requirements"], row["shift_id"], int(row["required_staff"])),
+        axis=1,
+    )
+
+    if "demand" not in df.columns:
+        df["demand"] = 0
+    df["demand"] = pd.to_numeric(df["demand"], errors="coerce").fillna(0).astype(int)
+    if (df["demand"] < 0).any():
+        raise ValueError("shifts.csv: demand deve essere >= 0")
+
+    if "demand_id" not in df.columns:
+        df["demand_id"] = ""
+    df["demand_id"] = df["demand_id"].fillna("").astype(str).str.strip()
 
     if df["shift_id"].duplicated().any():
         dups = df[df["shift_id"].duplicated()]["shift_id"].tolist()
@@ -203,6 +289,43 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
 
     df = df.drop_duplicates(subset=["employee_id", "shift_id"], keep="last").reset_index(drop=True)
     return df
+
+
+
+
+
+def load_demand_windows(path: Path) -> pd.DataFrame:
+    columns = ["demand_id", "window_start", "window_end", "role", "window_demand"]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+
+    df = pd.read_csv(path)
+    _ensure_columns(df, columns, path.name)
+
+    df = df.copy()
+    df["demand_id"] = df["demand_id"].astype(str).str.strip()
+    df = df[df["demand_id"] != ""]
+
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    df["role"] = df["role"].astype(str)
+    df["window_start"] = df["window_start"].apply(_parse_time_hhmm)
+    df["window_end"] = df["window_end"].apply(_parse_time_hhmm)
+    df["window_demand"] = pd.to_numeric(df["window_demand"], errors="raise").astype(int)
+
+    if (df["window_demand"] < 0).any():
+        raise ValueError(f"{path.name}: window_demand deve essere >= 0")
+
+    if df["demand_id"].duplicated().any():
+        warnings.warn(
+            f"{path.name}: demand_id duplicati, verra mantenuta l'ultima occorrenza",
+            RuntimeWarning,
+        )
+        df = df.drop_duplicates(subset="demand_id", keep="last")
+
+    df.reset_index(drop=True, inplace=True)
+    return df[columns]
 
 
 def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:

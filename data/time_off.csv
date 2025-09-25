@@ -1,0 +1,4 @@
+employee_id,day,start_time,end_time,reason
+E5,2025-10-02,,,conference
+E2,2025-09-30,12:00,18:00,medical_check
+E7,2025-10-03,16:00,20:00,family_event

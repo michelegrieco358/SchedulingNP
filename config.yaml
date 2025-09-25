@@ -1,0 +1,32 @@
+hours:
+  min_weekly: 0
+  max_weekly: 40
+  max_daily: 8
+rest:
+  min_between_shifts: 8
+skills:
+  enable_slack: true
+penalties:
+  unmet_window: 2.0
+  unmet_demand: 1.0
+  unmet_skill: 0.8
+  unmet_shift: 0.6
+  overtime: 0.3
+  fairness: 0.05
+  preferences: 0.05
+objective:
+  priority:
+    - unmet_window
+    - unmet_demand
+    - unmet_skill
+    - unmet_shift
+    - overtime
+    - fairness
+    - preferences
+random:
+  seed: 123
+solver:
+  time_limit_sec: null
+  mip_gap: null
+logging:
+  level: INFO

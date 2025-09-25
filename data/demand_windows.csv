@@ -1,0 +1,5 @@
+demand_id,window_start,window_end,role,window_demand
+WIN_NURSE_DAY,08:00,16:00,nurse,10
+WIN_NURSE_EVE,16:00,00:00,nurse,8
+WIN_DOC_DAY,08:00,20:00,doctor,4
+WIN_TRIAGE_PEAK,10:00,14:00,triage,3

@@ -2,3 +2,5 @@ pandas
 python-dateutil
 ortools
 pytest
+pydantic>=2,<3
+pyyaml>=6,<7

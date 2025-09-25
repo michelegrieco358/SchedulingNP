@@ -1,0 +1,12 @@
+employee_id,shift_id,score
+E1,S1_N1,2
+E1,S2_N1,1
+E1,S2_N2,-1
+E2,S3_N2,2
+E2,S1_N2,-2
+E4,S3_N1,2
+E4,S6_N1,-1
+E5,S4_D1,-2
+E5,S5_D1,1
+E7,S5_N1,2
+E7,S6_N2,-1
