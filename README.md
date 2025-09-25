@@ -12,6 +12,7 @@ Pianificatore turni avanzato basato su **OR-Tools CP-SAT** con supporto per **fi
 
 ## Indice
 
+- [Preservare l'integrità dei turni](#preservare-lintegrità-dei-turni)
 - [Caratteristiche](#caratteristiche)
 - [Finestre istantanee con slot adattivi](#finestre-istantanee-con-slot-adattivi)
 - [Schema CSV e migrazione](#schema-csv-e-migrazione)
@@ -26,6 +27,40 @@ Pianificatore turni avanzato basato su **OR-Tools CP-SAT** con supporto per **fi
 - [Roadmap](#roadmap)
 - [Struttura del progetto](#struttura-del-progetto)
 - [Licenza](#licenza)
+
+---
+
+## Preservare l'integrità dei turni
+
+Il sistema garantisce che ogni turno assegnato sia sempre **completo e indivisibile**, eliminando la frammentazione artificiale per maggiore realismo operativo.
+
+### **Come funziona**
+1. **Segmentazione mantenuta**: Il sistema continua a creare segmenti temporali per calcolare la domanda con precisione
+2. **Turni interi**: L'ottimizzazione seleziona solo turni completi, mai frazioni o slot parziali
+3. **Vincoli di copertura**: `∑_{turni i che coprono segmento s} capacità_i * y[i] >= domanda_s`
+4. **Integrità garantita**: Se un turno viene assegnato (y[i] = 1), copre **tutti** i segmenti nel suo intervallo
+
+### **Configurazione**
+```yaml
+shifts:
+  preserve_shift_integrity: true    # Default: true (raccomandato)
+```
+
+### **Esempio pratico**
+```
+Turno disponibile: 06:00-12:00
+Segmenti automatici: [06-08], [08-10], [10-12]  
+Domanda: serve solo fino alle 10:00
+
+❌ PRIMA (slot): Poteva assegnare solo 06:00-10:00
+✅ ADESSO (integrità): Assegna 06:00-12:00 completo o niente
+```
+
+### **Vantaggi**
+- **Realismo operativo**: I dipendenti lavorano turni completi, non frazioni
+- **Semplicità gestionale**: Più facile da pianificare e comunicare
+- **Precisione mantenuta**: Calcoli accurati di domanda e copertura
+- **Performance**: Spesso più veloce (meno variabili)
 
 ---
 
