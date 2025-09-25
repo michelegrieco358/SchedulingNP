@@ -269,14 +269,21 @@ class ShiftSchedulingCpSolver:
         self._build_assignment_variables()
         self._build_shift_aggregate_variables()
         self._add_shift_coverage_constraints()
-        self._add_window_coverage_constraints()
         self._add_shift_soft_demand_constraints()
         self._add_skill_coverage_constraints()
-        self._add_adaptive_slot_coverage_constraints()  # STEP 3B: Vincoli slot adattivi
         
-        # NUOVO: Vincoli di segmenti con turni interi (se preserve_shift_integrity=True)
+        # MODALITÀ OPERATIVE DISTINTE basate su preserve_shift_integrity
         if self.preserve_shift_integrity:
+            # MODALITÀ TURNI INTERI: usa solo vincoli basati su segmenti
+            # - NON costruisce vincoli su slot adattivi
+            # - Ottimizza solo sui turni interi per coprire la domanda di ogni segmento
             self._add_segment_coverage_constraints()
+        else:
+            # MODALITÀ SLOT ADATTIVI: comportamento legacy
+            # - Costruisce vincoli basati su slot e finestre
+            # - Permette frammentazione dei turni tramite slot
+            self._add_window_coverage_constraints()
+            self._add_adaptive_slot_coverage_constraints()
         self.duration_minutes = self._compute_shift_duration_minutes()
         if self.duration_minutes:
             avg_minutes = sum(self.duration_minutes.values()) / len(self.duration_minutes)
@@ -1854,6 +1861,7 @@ def main(argv: list[str] | None = None) -> int:
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,
+        preserve_shift_integrity=cfg.shifts.preserve_shift_integrity,
     )
     solver.build()
     cp_solver = solver.solve()
