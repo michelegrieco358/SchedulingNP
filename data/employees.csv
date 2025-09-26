@@ -1,4 +1,4 @@
-employee_id,name,roles,max_week_hours,min_rest_hours,max_overtime_hours,skills,min_hours,contracted_hours
+employee_id,name,roles,max_week_hours,min_rest_hours,max_overtime_hours,skills,min_week_hours,contracted_hours
 E1,Alice,nurse|triage,40,11,8,"first_aid,leadership",40,40
 E2,Bob,nurse,40,11,8,"first_aid",40,40
 E3,Carla,doctor,48,11,10,"icu,ventilation",48,48

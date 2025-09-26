@@ -111,7 +111,7 @@ def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample:
     print("=== Esempi di gap (prime righe) ===")
     print(gap_table.head(sample).to_string(index=False))
 
-def build_adaptive_slots(data, config) -> AdaptiveSlotData:
+def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
     """Generate adaptive time slots per (day, role) and segment coverage."""
 
     if hasattr(data, "shifts_df"):
@@ -180,9 +180,23 @@ def build_adaptive_slots(data, config) -> AdaptiveSlotData:
     for key in sorted(segments_by_day_role.keys()):
         seg_ids = segments_by_day_role[key]
         breakpoints: List[int] = []
+        
+        # Aggiungi breakpoints dai segmenti (turni)
         for seg_id in seg_ids:
             _, _, start, end = segment_bounds[seg_id]
             breakpoints.extend([start, end])
+        
+        # CORREZIONE CRITICA: Aggiungi breakpoints dalle finestre (windows)
+        if windows_df is not None and not windows_df.empty:
+            day, role = key
+            windows_for_key = windows_df[
+                (windows_df["day"] == day) & (windows_df["role"] == role)
+            ]
+            for _, window_row in windows_for_key.iterrows():
+                window_start = int(window_row["window_start_min"])
+                window_end = int(window_row["window_end_min"])
+                breakpoints.extend([window_start, window_end])
+        
         breakpoints = sorted(set(breakpoints))
 
         slots: List[str] = []

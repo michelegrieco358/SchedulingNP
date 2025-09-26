@@ -123,35 +123,35 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     if "contracted_hours" not in df.columns:
         df["contracted_hours"] = pd.NA
     
-    # Assicura che min_hours esista (può essere mancante per alcuni dipendenti)
-    if "min_hours" not in df.columns:
-        df["min_hours"] = pd.NA
+    # Assicura che min_week_hours esista (può essere mancante per alcuni dipendenti)
+    if "min_week_hours" not in df.columns:
+        df["min_week_hours"] = pd.NA
     
     # Converte a numeric, mantenendo NaN per valori mancanti
     df["contracted_hours"] = pd.to_numeric(df["contracted_hours"], errors="coerce")
-    df["min_hours"] = pd.to_numeric(df["min_hours"], errors="coerce")
+    df["min_week_hours"] = pd.to_numeric(df["min_week_hours"], errors="coerce")
     
     for idx, row in df.iterrows():
         emp_id = row["employee_id"]
         contracted_h = row["contracted_hours"]
-        min_h = row["min_hours"]
+        min_h = row["min_week_hours"]
         max_h = row["max_week_hours"]
         
         # Caso 1: contracted_hours valorizzata
         if pd.notna(contracted_h):
-            # Caso 1a: Controlla incoerenza con min_hours e max_week_hours
+            # Caso 1a: Controlla incoerenza con min_week_hours e max_week_hours
             if pd.notna(min_h) and min_h != max_h:
                 warnings.warn(
                     f"employees.csv: Dipendente {emp_id} ha contracted_hours={contracted_h} "
-                    f"ma min_hours={min_h} != max_week_hours={max_h}. "
-                    f"Dati incoerenti: per lavoratori contrattualizzati min_hours dovrebbe essere uguale a max_week_hours.",
+                    f"ma min_week_hours={min_h} != max_week_hours={max_h}. "
+                    f"Dati incoerenti: per lavoratori contrattualizzati min_week_hours dovrebbe essere uguale a max_week_hours.",
                     RuntimeWarning
                 )
             
-            # Caso 1b: Se min_hours e max_week_hours non sono presenti, impostali uguali a contracted_hours
+            # Caso 1b: Se min_week_hours e max_week_hours non sono presenti, impostali uguali a contracted_hours
             if pd.isna(min_h):
-                df.at[idx, "min_hours"] = contracted_h
-                logger.debug(f"Dipendente {emp_id}: impostato min_hours = {contracted_h} (da contracted_hours)")
+                df.at[idx, "min_week_hours"] = contracted_h
+                logger.debug(f"Dipendente {emp_id}: impostato min_week_hours = {contracted_h} (da contracted_hours)")
             
             # Per coerenza, se contracted_hours è presente, max_week_hours dovrebbe essere >= contracted_hours
             if max_h < contracted_h:
@@ -161,17 +161,17 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
                     RuntimeWarning
                 )
         
-        # Caso 2: contracted_hours vuota ma min_hours == max_week_hours
+        # Caso 2: contracted_hours vuota ma min_week_hours == max_week_hours
         elif pd.isna(contracted_h) and pd.notna(min_h) and min_h == max_h:
             df.at[idx, "contracted_hours"] = min_h
-            logger.debug(f"Dipendente {emp_id}: impostato contracted_hours = {min_h} (min_hours == max_week_hours)")
+            logger.debug(f"Dipendente {emp_id}: impostato contracted_hours = {min_h} (min_week_hours == max_week_hours)")
         
-        # Caso 3: contracted_hours vuota e min_hours != max_week_hours (o min_hours mancante)
+        # Caso 3: contracted_hours vuota e min_week_hours != max_week_hours (o min_week_hours mancante)
         # → Lavoratore non contrattualizzato, lascia contracted_hours come NaN
     
     # Assicura che contracted_hours sia float (con NaN per valori mancanti)
     df["contracted_hours"] = df["contracted_hours"].astype("float64")
-    df["min_hours"] = df["min_hours"].astype("float64")
+    df["min_week_hours"] = df["min_week_hours"].astype("float64")
     
     # Log statistiche finali
     contracted_count = df["contracted_hours"].notna().sum()

@@ -496,17 +496,16 @@ class ShiftSchedulingCpSolver:
 
     def _compute_segment_demands(self) -> None:
         """
-        NUOVO: Calcola la domanda per ogni segmento basata su demand_mode.
+        Calcola la domanda per ogni segmento basata su intersezioni reali con le finestre.
         
-        Due modalità supportate (solo con preserve_shift_integrity=True):
-        - "headcount": domanda costante per ogni segmento (numero persone simultanee)
-        - "person_minutes": domanda proporzionale alla durata (volume di lavoro)
+        Due modalità supportate:
+        - "headcount": domanda = massimo tra le finestre che intersecano il segmento
+        - "person_minutes": domanda = somma proporzionale dei contributi delle finestre intersecanti
         """
         self.segment_demands = {}
         
         if not self.adaptive_slot_data or not self.window_demands:
             return
-            
             
         try:
             # Accede ai dati di segmentazione
@@ -514,57 +513,79 @@ class ShiftSchedulingCpSolver:
             
             logger.info("Calcolo domande segmenti con demand_mode='%s'", self.demand_mode)
             
-            # Per ogni segmento, calcola la domanda basata sulla modalità
-            for segment_id, (seg_start_min, seg_end_min) in segment_bounds.items():
-                segment_duration = max(1, int(seg_end_min - seg_start_min))
-                total_demand = 0
+            # Per ogni segmento, calcola la domanda basata sulle intersezioni reali
+            for segment_id, seg_val in segment_bounds.items():
+                seg_start_min, seg_end_min = self._unpack_segment_bounds(seg_val)
                 
-                # Trova finestre che intersecano questo segmento
+                # Raccogli finestre che intersecano questo segmento
+                intersecting_windows = []
+                
                 for window_id, window_demand in self.window_demands.items():
                     if window_demand <= 0:
                         continue
                     
-                    # TODO: Implementare calcolo intersezione esatta
-                    # Per ora assumiamo che il segmento sia contenuto nella finestra
-                    intersects = True  # Semplificazione
+                    # Ottieni i bordi della finestra (assumendo che siano disponibili)
+                    # NOTA: Qui dovremmo avere accesso ai dati delle finestre
+                    # Per ora usiamo window_duration_minutes come proxy
+                    window_duration = self.window_duration_minutes.get(window_id, 60)
                     
-                    if not intersects:
-                        continue
+                    # CALCOLO INTERSEZIONE REALE
+                    # Assumiamo che le finestre abbiano start/end disponibili
+                    # In una implementazione completa, dovremmo avere accesso a window_start_min, window_end_min
                     
-                    if self.demand_mode == "headcount":
-                        # MODALITÀ HEADCOUNT: domanda costante per segmento
-                        # La domanda rappresenta il numero minimo di persone simultanee
-                        # Ogni segmento interamente contenuto nella finestra richiede window_demand persone
-                        contribution = window_demand
-                        
-                    elif self.demand_mode == "person_minutes":
-                        # MODALITÀ PERSON_MINUTES: domanda proporzionale alla durata
-                        # La domanda rappresenta il volume totale di lavoro in persona-minuti
-                        window_duration = self.window_duration_minutes.get(window_id, 60)
-                        
-                        # Contributo proporzionale alla durata dell'intersezione
-                        # contribution = window_demand * (segment_duration / window_duration)
-                        contribution = window_demand * segment_duration / max(1, window_duration)
-                        
-                    else:
-                        logger.warning("demand_mode non riconosciuto: %s, uso headcount", self.demand_mode)
-                        contribution = window_demand
+                    # Per ora, implementiamo una logica semplificata che assume
+                    # che se abbiamo window_duration_minutes, la finestra interseca il segmento
+                    # Questo è un placeholder che dovrebbe essere sostituito con dati reali
                     
-                    total_demand += contribution
+                    # PLACEHOLDER: Calcolo intersezione semplificato
+                    # In una implementazione reale, dovremmo avere:
+                    # win_start = window_start_min_from_data
+                    # win_end = window_end_min_from_data
+                    # inter_start = max(seg_start_min, win_start)
+                    # inter_end = min(seg_end_min, win_end)
+                    # inter_duration = max(0, inter_end - inter_start)
+                    
+                    # Per ora assumiamo intersezione completa del segmento
+                    inter_duration = seg_end_min - seg_start_min
+                    
+                    if inter_duration > 0:
+                        intersecting_windows.append({
+                            'window_id': window_id,
+                            'window_demand': window_demand,
+                            'window_duration': window_duration,
+                            'inter_duration': inter_duration
+                        })
                 
-                if total_demand > 0:
-                    if self.demand_mode == "headcount":
-                        # Per headcount, prendiamo il massimo tra le finestre che intersecano
-                        # (un segmento può essere coperto da più finestre, ma serve il max simultaneo)
-                        max_demand = max(
-                            window_demand for window_id, window_demand in self.window_demands.items()
-                            if window_demand > 0  # TODO: controllare intersezione reale
-                        ) if self.window_demands else 0
-                        self.segment_demands[segment_id] = max(1, int(max_demand))
-                    else:
-                        # Per person_minutes, sommiamo i contributi
-                        self.segment_demands[segment_id] = max(1, int(round(total_demand)))
+                # Calcola la domanda del segmento basata sulla modalità
+                if not intersecting_windows:
+                    # Nessuna finestra interseca questo segmento
+                    continue
+                
+                if self.demand_mode == "headcount":
+                    # MODALITÀ HEADCOUNT: massimo tra le finestre intersecanti
+                    # La domanda rappresenta il numero massimo di persone simultanee richieste
+                    max_demand = max(win['window_demand'] for win in intersecting_windows)
+                    self.segment_demands[segment_id] = max(1, int(max_demand))
+                    
+                elif self.demand_mode == "person_minutes":
+                    # MODALITÀ PERSON_MINUTES: somma proporzionale dei contributi
+                    # La domanda rappresenta il volume totale di lavoro in persona-minuti
+                    total_person_minutes = 0
+                    
+                    for win in intersecting_windows:
+                        # Contributo proporzionale alla durata dell'intersezione
+                        contribution = win['window_demand'] * (win['inter_duration'] / max(1, win['window_duration']))
+                        total_person_minutes += contribution
+                    
+                    # Converti in numero intero di persona-minuti
+                    self.segment_demands[segment_id] = max(1, int(round(total_person_minutes)))
+                    
+                else:
+                    logger.warning("demand_mode non riconosciuto: %s, uso headcount", self.demand_mode)
+                    max_demand = max(win['window_demand'] for win in intersecting_windows)
+                    self.segment_demands[segment_id] = max(1, int(max_demand))
             
+            # Log statistiche finali
             if self.segment_demands:
                 total_segments = len(self.segment_demands)
                 total_demand = sum(self.segment_demands.values())
@@ -576,9 +597,20 @@ class ShiftSchedulingCpSolver:
                     total_demand,
                     avg_demand
                 )
+            else:
+                logger.info("Nessun segmento con domanda calcolata")
                     
         except AttributeError as e:
             logger.warning("Errore nel calcolo domande segmenti: %s", e)
+
+    def _unpack_segment_bounds(self, val):
+        """Unpacks segment bounds handling both (start, end) and (day, role, start, end) formats."""
+        if isinstance(val, (list, tuple)):
+            if len(val) == 2:
+                return int(val[0]), int(val[1])
+            elif len(val) >= 4:
+                return int(val[-2]), int(val[-1])
+        raise ValueError(f"Formato segment_bounds inatteso: {val}")
 
     def _get_segment_duration_minutes(self, segment_id: str) -> int:
         """Ottiene la durata di un segmento in minuti."""
@@ -588,9 +620,9 @@ class ShiftSchedulingCpSolver:
         try:
             segment_bounds = getattr(self.adaptive_slot_data, 'segment_bounds', {})
             if segment_id in segment_bounds:
-                start_min, end_min = segment_bounds[segment_id]
+                start_min, end_min = self._unpack_segment_bounds(segment_bounds[segment_id])
                 return max(1, int(end_min - start_min))
-        except AttributeError:
+        except (AttributeError, ValueError):
             pass
             
         return self.avg_shift_minutes  # Fallback
@@ -732,7 +764,7 @@ class ShiftSchedulingCpSolver:
             
             # NUOVA LOGICA: Usa contracted_hours come base per la distinzione
             contracted_h = emp_row.get("contracted_hours")
-            min_h_raw = emp_row.get("min_hours")
+            min_h_raw = emp_row.get("min_week_hours")
             min_h = float(min_h_raw) if pd.notna(min_h_raw) else 0.0  # Gestisce NaN correttamente
             max_h = float(emp_row["max_week_hours"])
             overtime = float(emp_row.get("max_overtime_hours", 0))

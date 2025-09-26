@@ -16,9 +16,9 @@ def test_normalize_contracted_hours_missing_column():
     # CSV senza contracted_hours
     employees = pd.DataFrame([
         {"employee_id": "E1", "name": "Alice", "roles": "nurse", "max_week_hours": 40,
-         "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", "min_hours": 40},
+         "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", "min_week_hours": 40},
         {"employee_id": "E2", "name": "Bob", "roles": "nurse", "max_week_hours": 32,
-         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_hours": 10},
+         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_week_hours": 10},
     ])
     
     # Simula il comportamento del loader
@@ -39,7 +39,7 @@ def test_normalize_contracted_hours_with_incoherent_data():
     employees = pd.DataFrame([
         {"employee_id": "E1", "name": "Alice", "roles": "nurse", "max_week_hours": 40,
          "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", 
-         "contracted_hours": 32, "min_hours": 20},  # Incoerente: contracted_hours ma min_hours != max_week_hours
+         "contracted_hours": 32, "min_week_hours": 20},  # Incoerente: contracted_hours ma min_week_hours != max_week_hours
     ])
     
     with warnings.catch_warnings(record=True) as w:
@@ -61,8 +61,8 @@ def test_normalize_contracted_hours_sets_min_hours():
     
     _normalize_contracted_hours(employees)
     
-    # Verifica che min_hours sia stato impostato
-    assert employees.loc[0, "min_hours"] == 35.0
+    # Verifica che min_week_hours sia stato impostato
+    assert employees.loc[0, "min_week_hours"] == 35.0
 
 
 def test_solver_with_contracted_hours():
@@ -108,7 +108,7 @@ def test_solver_without_contracted_hours():
     """Test solver con dipendenti senza contracted_hours (risorsa esterna)."""
     employees = pd.DataFrame([
         {"employee_id": "E1", "name": "Bob", "roles": "nurse", "max_week_hours": 32,
-         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_hours": 10},
+         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_week_hours": 10},
         # Nessuna contracted_hours → risorsa esterna
     ])
     
@@ -150,7 +150,7 @@ def test_mixed_worker_types():
          "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", "contracted_hours": 32},
         # Risorsa esterna
         {"employee_id": "E2", "name": "Bob", "roles": "nurse", "max_week_hours": 30,
-         "min_rest_hours": 8, "max_overtime_hours": 5, "skills": "", "min_hours": 10},
+         "min_rest_hours": 8, "max_overtime_hours": 5, "skills": "", "min_week_hours": 10},
     ])
     
     shifts = pd.DataFrame([
@@ -206,7 +206,7 @@ def test_retrocompatibility_csv_without_contracted_hours():
         "min_rest_hours": [8, 8, 8],
         "max_overtime_hours": [8, 6, 5],
         "skills": ["", "", ""],
-        "min_hours": [40, 10, 30],  # E1: contrattualizzato, E2: flessibile, E3: contrattualizzato
+        "min_week_hours": [40, 10, 30],  # E1: contrattualizzato, E2: flessibile, E3: contrattualizzato
     }
     
     employees = pd.DataFrame(employees_data)

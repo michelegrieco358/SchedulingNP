@@ -240,15 +240,15 @@ def test_standard_worker_with_overtime():
 def test_multiple_worker_types():
     """Test mix di lavoratori standard e flessibili."""
     employees = pd.DataFrame([
-        # Contrattualizzato (min_hours == max_hours)
+        # Contrattualizzato (contracted_hours esplicita)
         {"employee_id": "E1", "name": "Alice", "roles": "nurse", "max_week_hours": 40,
-         "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", "min_hours": 40},
-        # Non contrattualizzato (min_hours < max_hours)
+         "min_rest_hours": 8, "max_overtime_hours": 8, "skills": "", "contracted_hours": 32},
+        # Non contrattualizzato (min_week_hours < max_hours)
         {"employee_id": "E2", "name": "Bob", "roles": "nurse", "max_week_hours": 32,
-         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_hours": 10},
-        # Non contrattualizzato (min_hours < max_hours)
+         "min_rest_hours": 8, "max_overtime_hours": 6, "skills": "", "min_week_hours": 10},
+        # Non contrattualizzato (min_week_hours < max_hours)
         {"employee_id": "E3", "name": "Carol", "roles": "nurse", "max_week_hours": 30,
-         "min_rest_hours": 8, "max_overtime_hours": 5, "skills": "", "min_hours": 5},
+         "min_rest_hours": 8, "max_overtime_hours": 5, "skills": "", "min_week_hours": 5},
     ])
     
     # Turni sufficienti per tutti
@@ -286,8 +286,8 @@ def test_multiple_worker_types():
         emp_assignments = assignments[assignments["employee_id"] == emp_id]
         total_minutes = len(emp_assignments) * 480
         
-        if emp_id == "E1":  # Contrattualizzato (min_hours=40, max_hours=40)
-            assert total_minutes >= 2400  # Almeno 40 ore
+        if emp_id == "E1":  # Contrattualizzato (contracted_hours=32)
+            assert total_minutes >= 1920  # Almeno 32 ore
         elif emp_id == "E2":  # Non contrattualizzato (min_hours=10, max_hours=32)
             assert total_minutes >= 600   # Almeno 10 ore (min_hours)
             assert total_minutes <= 1920  # Massimo 32 ore (NO straordinari)
