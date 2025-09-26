@@ -314,6 +314,38 @@ source .venv/bin/activate           # Windows: .venv\Scripts\activate
 pip install -U ortools pandas python-dateutil
 ```
 
+### **Configurazione PYTHONPATH**
+
+Il progetto utilizza import relativi per la riusabilità come package. Per utilizzare i moduli singolarmente o in ambienti diversi, assicurati che la directory root del progetto sia nel PYTHONPATH:
+
+```bash
+# Linux/macOS
+export PYTHONPATH="${PYTHONPATH}:/path/to/shift-scheduling"
+
+# Windows
+set PYTHONPATH=%PYTHONPATH%;C:\path\to\shift-scheduling
+
+# Oppure aggiungi programmaticamente in Python
+import sys
+sys.path.insert(0, '/path/to/shift-scheduling')
+```
+
+**Esempi di utilizzo:**
+
+```python
+# ✅ Corretto - esecuzione come modulo (raccomandato)
+python -m src.model_cp --config config.yaml
+
+# ✅ Corretto - con PYTHONPATH configurato
+from src.loader import load_employees
+from src.model_cp import ShiftSchedulingCpSolver
+
+# ❌ Fallisce senza PYTHONPATH
+python src/model_cp.py  # ImportError: No module named 'src.time_utils'
+```
+
+**Nota:** L'esecuzione tramite `python -m src.module` è il metodo raccomandato in quanto gestisce automaticamente i path relativi.
+
 ---
 
 ## Dati di input (CSV)
