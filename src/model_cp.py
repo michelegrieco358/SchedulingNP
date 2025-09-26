@@ -1875,31 +1875,12 @@ def main(argv: list[str] | None = None) -> int:
         print(assignments_df.head(10).to_string(index=False))
 
     # Generazione report CSV
-    reporter.generate_coverage_report(report_dir / "coverage_report.csv")
-    reporter.generate_constraint_report(report_dir / "constraint_report.csv")
-    reporter.generate_objective_report(report_dir / "objective_report.csv")
+    reporter.generate_segment_coverage_report()
+    reporter.generate_constraint_report()
+    reporter.generate_objective_breakdown()
     
-    # Output a console dei principali indicatori
-    print("\n=== Riepilogo Diagnostico ===")
-    
-    # Copertura
-    coverage_stats = reporter.get_coverage_summary()
-    print("\nStatistiche Copertura:")
-    print(f"- Media copertura: {coverage_stats['avg_coverage']:.1%}")
-    print(f"- Segmenti sottodimensionati: {coverage_stats['understaffed_segments']}")
-    print(f"- Segmenti sovradimensionati: {coverage_stats['overstaffed_segments']}")
-
-    # Vincoli
-    constraint_stats = reporter.get_constraint_summary() 
-    print("\nStato Vincoli:")
-    print(f"- Vincoli violati: {constraint_stats['violated']}")
-    print(f"- Vincoli attivi: {constraint_stats['binding']}")
-    
-    # Obiettivo
-    obj_stats = reporter.get_objective_summary()
-    print("\nBreakdown Obiettivo:")
-    for term in obj_stats:
-        print(f"- {term.name}: {term.value:.2f} (peso: {term.weight}, contributo: {term.contribution:.1%})")
+    # Log breakdown obiettivo direttamente dal solver
+    solver.log_objective_breakdown(cp_solver)
 
     # Report dettagliati sempre abilitati
     overtime_df = solver.extract_overtime_summary(cp_solver)

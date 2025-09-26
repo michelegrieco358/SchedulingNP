@@ -10,7 +10,10 @@ from dateutil import parser as dtparser
 import pandas as pd
 import warnings
 
-from src.time_utils import normalize_2400, parse_hhmm_to_min
+try:
+    from .time_utils import normalize_2400, parse_hhmm_to_min
+except ImportError:  # fallback when running as a script
+    from time_utils import normalize_2400, parse_hhmm_to_min  # type: ignore
 
 
 logger = logging.getLogger(__name__)

@@ -103,13 +103,27 @@ def conflict_pairs_for_rest(shifts_norm: pd.DataFrame, min_rest_hours: float) ->
 
 
 # --- 4) Utility di riepilogo per debug ---
-def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample: int = 10):
+def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample: int = 10) -> pd.DataFrame:
+    """
+    Stampa un riepilogo dei turni normalizzati e restituisce il DataFrame di riepilogo.
+    
+    Args:
+        shifts_norm: DataFrame dei turni normalizzati
+        gap_table: DataFrame con i gap tra turni
+        sample: Numero di righe di esempio da mostrare per i gap
+        
+    Returns:
+        DataFrame con le colonne principali dei turni normalizzati
+    """
     print("=== Shifts normalizzati ===")
     cols = ["shift_id", "day", "start_dt", "end_dt", "duration_h", "role", "required_staff"]
-    print(shifts_norm[cols].to_string(index=False, max_colwidth=24))
+    summary_df = shifts_norm[cols].copy()
+    print(summary_df.to_string(index=False, max_colwidth=24))
     print()
     print("=== Esempi di gap (prime righe) ===")
     print(gap_table.head(sample).to_string(index=False))
+    
+    return summary_df
 
 def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
     """Generate adaptive time slots per (day, role) and segment coverage."""

@@ -98,7 +98,6 @@ class ScheduleReporter:
             df = pd.DataFrame([vars(c) for c in coverages])
             df = df[columns]
         else:
-            # Se non ci sono dati, crea un DataFrame vuoto con le colonne corrette
             df = pd.DataFrame(columns=columns)
         
         # Salva su file
