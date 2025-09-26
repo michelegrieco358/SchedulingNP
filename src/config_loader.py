@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_CANDIDATES = ("config.yaml", "config.yml", "config.json")
-PRIORITY_KEYS = ("unmet_window", "unmet_demand", "unmet_skill", "unmet_shift", "overtime", "fairness", "preferences")
+PRIORITY_KEYS = ("unmet_window", "unmet_demand", "unmet_skill", "unmet_shift", "overstaff", "overtime", "fairness", "preferences")
 
 
 class HoursConfig(BaseModel):
@@ -73,6 +73,7 @@ class PenaltiesConfig(BaseModel):
     unmet_demand: float = Field(1.0, ge=0)
     unmet_skill: float = Field(0.8, ge=0)
     unmet_shift: float = Field(1.0, ge=0)
+    overstaff: float = Field(0.15, ge=0)
     overtime: float = Field(0.30, ge=0)
     fairness: float = Field(0.05, ge=0)
     preferences: float = Field(0.33, ge=0)

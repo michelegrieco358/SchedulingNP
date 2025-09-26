@@ -44,6 +44,7 @@ BASE_WINDOW_WEIGHT_H = 2.0
 BASE_SHIFT_WEIGHT_H = 1.0
 BASE_SKILL_WEIGHT_H = 0.8
 BASE_SHIFT_SOFT_WEIGHT_H = 0.6
+BASE_OVERSTAFF_WEIGHT_H = 0.15
 BASE_OVERTIME_WEIGHT_H = 0.3
 BASE_FAIRNESS_WEIGHT_H = 0.05
 BASE_PREFERENCES_WEIGHT_H = 0.05
@@ -52,6 +53,7 @@ DEFAULT_WINDOW_SHORTFALL_PRIORITY = int(BASE_WINDOW_WEIGHT_H * 100)
 DEFAULT_SHORTFALL_PRIORITY = int(BASE_SHIFT_WEIGHT_H * 100)
 DEFAULT_SKILL_SHORTFALL_PRIORITY = int(BASE_SKILL_WEIGHT_H * 100)
 DEFAULT_SHIFT_SOFT_PRIORITY = int(BASE_SHIFT_SOFT_WEIGHT_H * 100)
+DEFAULT_OVERSTAFF_PRIORITY = int(BASE_OVERSTAFF_WEIGHT_H * 100)
 DEFAULT_OVERTIME_PRIORITY = int(BASE_OVERTIME_WEIGHT_H * 100)
 DEFAULT_FAIRNESS_WEIGHT = int(BASE_FAIRNESS_WEIGHT_H * 100)
 DEFAULT_PREFERENCES_WEIGHT = int(BASE_PREFERENCES_WEIGHT_H * 100)
@@ -191,6 +193,7 @@ class ShiftSchedulingCpSolver:
         self._vars_by_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
         self.shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_shortfall_vars: dict[str, cp_model.IntVar] = {}
+        self.window_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.shift_soft_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
@@ -1342,6 +1345,7 @@ class ShiftSchedulingCpSolver:
             "unmet_demand": BASE_SHIFT_WEIGHT_H,
             "unmet_skill": BASE_SKILL_WEIGHT_H,
             "unmet_shift": BASE_SHIFT_SOFT_WEIGHT_H,
+            "overstaff": BASE_OVERSTAFF_WEIGHT_H,
             "overtime": BASE_OVERTIME_WEIGHT_H,
             "fairness": BASE_FAIRNESS_WEIGHT_H,
             "preferences": BASE_PREFERENCES_WEIGHT_H,
@@ -1726,6 +1730,7 @@ def main(argv: list[str] | None = None) -> int:
         "unmet_demand": cfg.penalties.unmet_demand,
         "unmet_skill": cfg.penalties.unmet_skill,
         "unmet_shift": cfg.penalties.unmet_shift,
+        "overstaff": cfg.penalties.overstaff,
         "overtime": args.overtime_priority if args.overtime_priority is not None else cfg.penalties.overtime,
         "fairness": args.fairness_weight if args.fairness_weight is not None else cfg.penalties.fairness,
         "preferences": args.preferences_weight if args.preferences_weight is not None else cfg.penalties.preferences,

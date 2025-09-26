@@ -14,6 +14,7 @@ penalties:
   unmet_demand: 1.0
   unmet_skill: 0.8
   unmet_shift: 0.6
+  overstaff: 0.15
   overtime: 0.30
   preferences: 0.33
   fairness: 0.05
@@ -23,6 +24,7 @@ objective:
     - unmet_demand
     - unmet_skill
     - unmet_shift
+    - overstaff
     - overtime
     - fairness
     - preferences
