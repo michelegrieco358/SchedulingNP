@@ -254,10 +254,13 @@ class ShiftSchedulingCpSolver:
         # NUOVO: Parametro per preservare integrità turni
         self.preserve_shift_integrity = bool(preserve_shift_integrity)
         
+        # NUOVO: Modalità interpretazione domanda (solo con preserve_shift_integrity=True)
+        self.demand_mode = "headcount"  # Default, sarà aggiornato dal config
+        
         # Variabili per vincoli di segmenti con turni interi (quando preserve_shift_integrity=True)
         self.segment_shortfall_vars: dict[str, cp_model.IntVar] = {}  # short_segment[seg_id]
         self.shift_to_covering_segments: dict[str, list[str]] = {}  # Mappa turno -> segmenti che copre
-        self.segment_demands: dict[str, int] = {}  # Domanda per segmento in persona-minuti
+        self.segment_demands: dict[str, int] = {}  # Domanda per segmento (headcount o persona-minuti)
         
         # STEP 4A: Pesi obiettivo in persona-minuti (conversione da persona-ora)
         self.objective_weights_minutes: dict[str, float] = {}
@@ -603,46 +606,90 @@ class ShiftSchedulingCpSolver:
 
     def _compute_segment_demands(self) -> None:
         """
-        Calcola la domanda per ogni segmento in persona-minuti.
+        NUOVO: Calcola la domanda per ogni segmento basata su demand_mode.
         
-        La domanda di un segmento deriva dalle finestre temporali che lo intersecano.
-        Per ogni finestra w che interseca il segmento s:
-        - Contributo = window_demand[w] * durata_intersezione / durata_finestra
+        Due modalità supportate (solo con preserve_shift_integrity=True):
+        - "headcount": domanda costante per ogni segmento (numero persone simultanee)
+        - "person_minutes": domanda proporzionale alla durata (volume di lavoro)
         """
         self.segment_demands = {}
         
         if not self.adaptive_slot_data or not self.window_demands:
             return
             
+        # Solo applicabile quando preserve_shift_integrity=True
+        if not self.preserve_shift_integrity:
+            logger.info("demand_mode ignorato: preserve_shift_integrity=False")
+            return
+            
         try:
             # Accede ai dati di segmentazione
             segment_bounds = getattr(self.adaptive_slot_data, 'segment_bounds', {})
             
-            # Per ogni segmento, calcola la domanda totale
+            logger.info("Calcolo domande segmenti con demand_mode='%s'", self.demand_mode)
+            
+            # Per ogni segmento, calcola la domanda basata sulla modalità
             for segment_id, (seg_start_min, seg_end_min) in segment_bounds.items():
                 segment_duration = max(1, int(seg_end_min - seg_start_min))
                 total_demand = 0
                 
-                # Controlla ogni finestra per vedere se interseca questo segmento
+                # Trova finestre che intersecano questo segmento
                 for window_id, window_demand in self.window_demands.items():
                     if window_demand <= 0:
                         continue
+                    
+                    # TODO: Implementare calcolo intersezione esatta
+                    # Per ora assumiamo che il segmento sia contenuto nella finestra
+                    intersects = True  # Semplificazione
+                    
+                    if not intersects:
+                        continue
+                    
+                    if self.demand_mode == "headcount":
+                        # MODALITÀ HEADCOUNT: domanda costante per segmento
+                        # La domanda rappresenta il numero minimo di persone simultanee
+                        # Ogni segmento interamente contenuto nella finestra richiede window_demand persone
+                        contribution = window_demand
                         
-                    # Ottieni bounds della finestra (assumendo che siano disponibili)
-                    window_duration = self.window_duration_minutes.get(window_id, 60)
+                    elif self.demand_mode == "person_minutes":
+                        # MODALITÀ PERSON_MINUTES: domanda proporzionale alla durata
+                        # La domanda rappresenta il volume totale di lavoro in persona-minuti
+                        window_duration = self.window_duration_minutes.get(window_id, 60)
+                        
+                        # Contributo proporzionale alla durata dell'intersezione
+                        # contribution = window_demand * (segment_duration / window_duration)
+                        contribution = window_demand * segment_duration / max(1, window_duration)
+                        
+                    else:
+                        logger.warning("demand_mode non riconosciuto: %s, uso headcount", self.demand_mode)
+                        contribution = window_demand
                     
-                    # Per semplicità, assumiamo che ogni segmento contribuisca proporzionalmente
-                    # alla domanda della finestra che lo contiene
-                    # Questo è un'approssimazione - in un'implementazione completa
-                    # dovremmo calcolare l'intersezione esatta
-                    
-                    # Contributo = window_demand * (segment_duration / window_duration)
-                    # Ma per ora usiamo una logica semplificata
-                    contribution = window_demand * segment_duration / 60.0  # Normalizzato per ora
                     total_demand += contribution
                 
                 if total_demand > 0:
-                    self.segment_demands[segment_id] = max(1, int(round(total_demand)))
+                    if self.demand_mode == "headcount":
+                        # Per headcount, prendiamo il massimo tra le finestre che intersecano
+                        # (un segmento può essere coperto da più finestre, ma serve il max simultaneo)
+                        max_demand = max(
+                            window_demand for window_id, window_demand in self.window_demands.items()
+                            if window_demand > 0  # TODO: controllare intersezione reale
+                        ) if self.window_demands else 0
+                        self.segment_demands[segment_id] = max(1, int(max_demand))
+                    else:
+                        # Per person_minutes, sommiamo i contributi
+                        self.segment_demands[segment_id] = max(1, int(round(total_demand)))
+            
+            if self.segment_demands:
+                total_segments = len(self.segment_demands)
+                total_demand = sum(self.segment_demands.values())
+                avg_demand = total_demand / total_segments
+                logger.info(
+                    "Domande segmenti (%s): %d segmenti, domanda totale %d, media %.1f",
+                    self.demand_mode,
+                    total_segments,
+                    total_demand,
+                    avg_demand
+                )
                     
         except AttributeError as e:
             logger.warning("Errore nel calcolo domande segmenti: %s", e)
@@ -1013,8 +1060,14 @@ class ShiftSchedulingCpSolver:
 
         terms = []
         for segment_id, var in self.segment_shortfall_vars.items():
-            # Il shortfall è già in persona-minuti, quindi non serve moltiplicare per durata
-            terms.append(var)
+            if self.demand_mode == "headcount":
+                # MODALITÀ HEADCOUNT: shortfall in persone, moltiplicare per durata segmento
+                # per ottenere persona-minuti per coerenza con funzione obiettivo
+                segment_duration = self._get_segment_duration_minutes(segment_id)
+                terms.append(segment_duration * var)
+            else:
+                # MODALITÀ PERSON_MINUTES: shortfall già in persona-minuti
+                terms.append(var)
 
         if not terms:
             return 0, False
@@ -1863,6 +1916,9 @@ def main(argv: list[str] | None = None) -> int:
         objective_weights=objective_weights,
         preserve_shift_integrity=cfg.shifts.preserve_shift_integrity,
     )
+    
+    # NUOVO: Imposta demand_mode dal config
+    solver.demand_mode = cfg.shifts.demand_mode
     solver.build()
     cp_solver = solver.solve()
 

@@ -8,7 +8,7 @@ skills:
   enable_slack: true
 shifts:
   preserve_shift_integrity: true
-  demand_mode: "headcount"  # "headcount" | "person_minutes"
+  demand_mode: "headcount"  # Modalità persone simultanee
 penalties:
   unmet_window: 2.0
   unmet_demand: 1.0

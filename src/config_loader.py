@@ -65,6 +65,16 @@ class ShiftsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     preserve_shift_integrity: bool = True
+    demand_mode: str = Field("headcount")
+
+    @field_validator("demand_mode")
+    @classmethod
+    def validate_demand_mode(cls, value: str) -> str:
+        modes = {"headcount", "person_minutes"}
+        value = value.strip().lower()
+        if value not in modes:
+            raise ValueError(f"demand_mode deve essere uno tra {sorted(modes)}")
+        return value
 
 
 class ReportConfig(BaseModel):
