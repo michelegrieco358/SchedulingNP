@@ -5,7 +5,7 @@ Caratteristiche principali:
 - prevede la presenza di **vincoli hard**: da rispettare necessariamente, se non è possibile l'istanza del problema si dichiara **infeasible**.
 - prevede la presenza di **vincoli soft**: si cerca di rispettarli, se non è possibile si assegnano **penalità, da minimizzare nella funzione obiettivo.**
 - prevede l'assegnazione di **turni intesi come contenitori temporali indivisibili (ne viene sempre preservata l'integrità)**
-- prevede la possibilità di definire **finestre temporali in cui indicare la domanda di personale e di competenze richieste, in modo da adattare l'orario alle esigenze dell'azienda**; per esempio in un certo intervallo di tempo possono essere previsti picchi di lavoro e quindi di domanda di personale, oppure sono necessarie delle particolari skills.
+- prevede la possibilità di definire **finestre temporali in cui indicare la domanda di personale e di competenze richieste, in modo da adattare l'orario alle esigenze dell'azienda**; per esempio in un certo intervallo di tempo possono essere previsti picchi di lavoro e quindi di domanda di personale, oppure sono necessarie delle particolari skill
 - prevede la presenza di vincoli (hard) contrattuali: numero massimo di ore, massimo di straordinari, riposo, ecc..
 - tiene conto delle preferenze dei dipendenti riguardo i turni che gli possono venire assegnati (vincolo soft)
 - considera la presenza di lavoratori dipendenti interni e di possibili risorse esterne, che non necessariamente devono essere attivate
