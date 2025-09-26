@@ -39,6 +39,16 @@ class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_slack: bool = True
+    skill_mode: str = Field("by_shift")
+
+    @field_validator("skill_mode")
+    @classmethod
+    def validate_skill_mode(cls, value: str) -> str:
+        modes = {"by_shift", "by_segment"}
+        value = value.strip().lower()
+        if value not in modes:
+            raise ValueError(f"skill_mode deve essere uno tra {sorted(modes)}")
+        return value
 
 
 class ShiftsConfig(BaseModel):

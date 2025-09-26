@@ -6,6 +6,7 @@ rest:
   min_between_shifts: 8
 skills:
   enable_slack: true
+  skill_mode: "by_shift"  # "by_shift" o "by_segment"
 shifts:
   demand_mode: "headcount"  # "headcount" | "person_minutes"
 penalties:

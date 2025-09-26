@@ -79,6 +79,37 @@ def _parse_skill_list(value: str) -> set[str]:
     return set(tokens)
 
 
+def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
+    """Parse skills requirements for windows from format 'skill1:qty1,skill2:qty2'."""
+    if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+        return {}
+    text_value = str(raw_value).strip()
+    if not text_value:
+        return {}
+
+    normalized: dict[str, int] = {}
+    for chunk in text_value.split(','):
+        part = chunk.strip()
+        if not part:
+            continue
+        if ':' not in part:
+            raise ValueError(f"windows.csv: skills per {window_id} deve usare formato skill:quantity")
+        skill_name, value_part = part.split(':', 1)
+        skill_name = skill_name.strip()
+        if not skill_name:
+            raise ValueError(f"windows.csv: skill vuota nella finestra {window_id}")
+        try:
+            qty_int = int(str(value_part).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"windows.csv: valore non intero per skill {skill_name} della finestra {window_id}: {value_part}") from exc
+        if qty_int < 0:
+            raise ValueError(f"windows.csv: valore negativo per skill {skill_name} della finestra {window_id}")
+        if qty_int > 0:
+            normalized[skill_name] = qty_int
+
+    return normalized
+
+
 def _parse_skill_requirements(raw_value, shift_id: str, capacity_hint: int) -> dict[str, int]:
     if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
         return {}
@@ -413,6 +444,18 @@ def load_windows(
 
     df["window_minutes"] = df["window_end_min"] - df["window_start_min"]
 
+    # Parse skills column if present
+    if "skills" in df.columns:
+        df["skills"] = df["skills"].fillna("")
+        df["skill_requirements"] = df.apply(
+            lambda row: _parse_window_skills(row["skills"], row["window_id"]),
+            axis=1,
+        )
+        extended_cols = extended_cols + ["skill_requirements"]
+    else:
+        df["skill_requirements"] = [{}] * len(df)
+        extended_cols = extended_cols + ["skill_requirements"]
+
     if shifts is not None and not shifts.empty:
         known_roles = set(shifts["role"].astype(str).str.strip())
         unknown_roles = sorted(set(df["role"]) - known_roles)
@@ -627,6 +670,7 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None, shifts_onl
             "end_min": int(row.window_end_min),
             "window_minutes": int(row.window_minutes),
             "window_demand": int(row.window_demand),
+            "skill_req": dict(row.skill_requirements) if hasattr(row, 'skill_requirements') and isinstance(row.skill_requirements, dict) else {},
         }
         for row in windows_df.itertuples()
     }

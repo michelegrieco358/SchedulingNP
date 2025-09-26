@@ -231,6 +231,7 @@ def test_overtime_soft_constraint_allows_solution():
             "max_week_hours": 16,
             "min_rest_hours": 0,
             "max_overtime_hours": 16,
+            "min_hours": 16,  # Rende il lavoratore contrattualizzato (min_hours == max_hours)
         }
     ])
 
@@ -440,6 +441,7 @@ def test_shortfall_priority_increase_preserves_solution():
             "max_week_hours": 8,
             "min_rest_hours": 0,
             "max_overtime_hours": 16,
+            "min_hours": 8,  # Rende il lavoratore contrattualizzato (min_hours == max_hours)
         }
     ])
 
@@ -650,4 +652,3 @@ def test_time_off_blocks_assignments():
 
     e1_mask = assign_mask[(assign_mask["employee_id"] == "E1") & (assign_mask["shift_id"] == "S1")]
     assert int(e1_mask.iloc[0]["timeoff_block"]) == 1
-
