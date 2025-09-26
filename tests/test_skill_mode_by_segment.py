@@ -187,7 +187,7 @@ def test_skill_mode_case_insensitive():
 
 def test_example_windows_with_skills():
     """Test del file di esempio con skills."""
-    example_file = Path("examples/windows_with_skills.csv")
+    example_file = Path("data/windows_with_skills.csv")
     if not example_file.exists():
         pytest.skip("File di esempio non trovato")
     

@@ -184,55 +184,7 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     )
 
 
-def _parse_skill_requirements(raw_value, shift_id: str, capacity_hint: int) -> dict[str, int]:
-    if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
-        return {}
-    text_value = str(raw_value).strip()
-    if not text_value:
-        return {}
-
-    if text_value.startswith('{'):
-        try:
-            parsed_obj = json.loads(text_value)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"shifts.csv: skill_requirements JSON non valido per {shift_id}: {text_value}") from exc
-        if not isinstance(parsed_obj, dict):
-            raise ValueError(f"shifts.csv: skill_requirements per {shift_id} deve essere un oggetto")
-        items = list(parsed_obj.items())
-    else:
-        items = []
-        for chunk in text_value.split(','):
-            part = chunk.strip()
-            if not part:
-                continue
-            if '=' not in part:
-                raise ValueError(f"shifts.csv: skill_requirements per {shift_id} deve usare key=value")
-            key, value_part = part.split('=', 1)
-            items.append((key, value_part))
-
-    normalized: dict[str, int] = {}
-    for key, value in items:
-        skill_name = str(key).strip()
-        if not skill_name:
-            raise ValueError(f"shifts.csv: skill vuota nel turno {shift_id}")
-        try:
-            qty_int = int(str(value).strip())
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"shifts.csv: valore non intero per skill {skill_name} del turno {shift_id}: {value}") from exc
-        if qty_int < 0:
-            raise ValueError(f"shifts.csv: valore negativo per skill {skill_name} del turno {shift_id}")
-        if qty_int > 0:
-            normalized[skill_name] = qty_int
-
-    total_req = sum(normalized.values())
-    if capacity_hint is not None:
-        limit = max(1, int(capacity_hint))
-        if total_req > limit:
-            warnings.warn(
-                f"shifts.csv: skill_requirements per {shift_id} sommano {total_req} > capacità di riferimento {limit}",
-                RuntimeWarning,
-            )
-    return normalized
+# Function removed - skill requirements from shifts are no longer supported
 
 
 
@@ -296,31 +248,10 @@ def load_shifts(path: Path) -> pd.DataFrame:
     df["end"] = df["end_min"].apply(_minutes_to_time)
     df["role"] = df["role"].astype(str).str.strip()
 
-    # Only 'demand' field is supported in v2.0+
-    if "demand" not in original_cols:
-        raise ValueError("shifts.csv: 'demand' column is required. Legacy 'required_staff' is no longer supported.")
-    
-    if "required_staff" in original_cols:
-        raise ValueError("shifts.csv: 'required_staff' field is no longer supported. Use 'demand' instead.")
-    
-    df["demand"] = pd.to_numeric(df["demand"], errors="coerce").fillna(0).astype(int)
-    if (df["demand"] < 0).any():
-        raise ValueError("shifts.csv: demand deve essere >= 0")
-    
-    # Set required_staff = demand for internal consistency
-    df["required_staff"] = df["demand"]
-
-    if "skill_requirements" not in original_cols:
-        df["skill_requirements"] = ""
-    df["skill_requirements"] = df["skill_requirements"].fillna("")
-    df["skill_requirements"] = df.apply(
-        lambda row: _parse_skill_requirements(
-            row["skill_requirements"],
-            row["shift_id"],
-            int(max(row["demand"], row["required_staff"], 0)),
-        ),
-        axis=1,
-    )
+    # Shifts are now pure temporal templates - no demand or skill requirements
+    df["required_staff"] = 1  # Fixed value, not used by solver
+    df["demand"] = 1  # Fixed value, not used by solver
+    df["skill_requirements"] = [{}] * len(df)  # Always empty
 
     df["crosses_midnight"] = df["end_min"] <= df["start_min"]
     df["duration_minutes"] = df.apply(

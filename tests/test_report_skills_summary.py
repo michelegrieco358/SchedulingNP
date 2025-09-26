@@ -5,6 +5,7 @@ import precompute
 
 
 def _prepare_solver(required_skill_shortfall: bool):
+    """Aggiornato per riflettere che non ci sono più skill requirements dai turni."""
     employees = pd.DataFrame(
         [
             {
@@ -30,7 +31,7 @@ def _prepare_solver(required_skill_shortfall: bool):
         ]
     )
     shifts_norm = precompute.normalize_shift_times(shifts)
-    shifts_norm["skill_requirements"] = [{"muletto": 1}]
+    shifts_norm["skill_requirements"] = [{}]  # Sempre vuoto
 
     assign_mask = pd.DataFrame(
         [
@@ -55,7 +56,7 @@ def _prepare_solver(required_skill_shortfall: bool):
         overtime_costs=None,
         preferences=pd.DataFrame(columns=["employee_id", "shift_id", "score"]),
         emp_skills=emp_skills,
-        shift_skill_requirements={"S1": {"muletto": 1}},
+        shift_skill_requirements={},  # Non più skill dai turni
         config=solver_cfg,
     )
     solver.build()
@@ -64,17 +65,18 @@ def _prepare_solver(required_skill_shortfall: bool):
 
 
 def test_skill_summary_reports_shortfall():
+    """Test che senza skill requirements dai turni, non ci sia shortfall."""
     solver, cp_solver = _prepare_solver(required_skill_shortfall=True)
     summary = solver.extract_skill_coverage_summary(cp_solver)
 
-    assert list(summary.columns) == ["shift_id", "skill", "required", "covered", "shortfall"]
-    assert summary.loc[0, "shortfall"] == 1
-    assert summary.loc[0, "covered"] == 0
+    # Nessuna skill requirement dai turni -> nessun report
+    assert len(summary) == 0
 
 
 def test_skill_summary_reports_coverage():
+    """Test che senza skill requirements dai turni, non ci sia coverage report."""
     solver, cp_solver = _prepare_solver(required_skill_shortfall=False)
     summary = solver.extract_skill_coverage_summary(cp_solver)
 
-    assert summary.loc[0, "shortfall"] == 0
-    assert summary.loc[0, "covered"] >= summary.loc[0, "required"]
+    # Nessuna skill requirement dai turni -> nessun report
+    assert len(summary) == 0

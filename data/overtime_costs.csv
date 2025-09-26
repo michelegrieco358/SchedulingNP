@@ -1,4 +1,5 @@
 role,overtime_cost_per_hour
-nurse,45
-triage,42
-doctor,60
+nurse,25.0
+doctor,45.0
+triage,22.0
+emergency,50.0

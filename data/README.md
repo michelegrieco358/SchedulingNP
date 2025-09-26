@@ -1,6 +1,6 @@
-# Esempi Shift Scheduling
+# Dataset Shift Scheduling
 
-Questa cartella contiene esempi completi per dimostrare le funzionalità del sistema di shift scheduling con **finestre istantanee** e **slot adattivi**.
+Questa cartella contiene i dati di input per il sistema di shift scheduling con **finestre istantanee** e **slot adattivi**.
 
 ## 📁 File inclusi
 
@@ -26,21 +26,21 @@ Questa cartella contiene esempi completi per dimostrare le funzionalità del sis
 ### **1. Esecuzione base**
 ```bash
 # Dalla directory principale del progetto
-python -m src.model_cp --config examples/config.yaml --data-dir examples --max-seconds 30
+python -m src.model_cp --config data/config.yaml --data-dir data --max-seconds 30
 ```
 
 ### **2. Con output salvato**
 ```bash
 python -m src.model_cp \
-  --config examples/config.yaml \
-  --data-dir examples \
+  --config data/config.yaml \
+  --data-dir data \
   --max-seconds 60 \
-  --output examples/results_assignments.csv
+  --output data/results_assignments.csv
 ```
 
 ### **3. Validazione dati**
 ```bash
-python -m src.loader --data-dir examples
+python -m src.loader --data-dir data
 ```
 
 ## 📊 Output atteso
@@ -60,7 +60,7 @@ Breakdown obiettivo salvato in reports/objective_breakdown.csv
 
 ### **File generati**
 - `reports/objective_breakdown.csv` - Breakdown dettagliato costi
-- `examples/results_assignments.csv` - Assegnazioni finali (se specificato)
+- `data/results_assignments.csv` - Assegnazioni finali (se specificato)
 
 ## 🔧 Personalizzazioni
 
@@ -68,19 +68,19 @@ Breakdown obiettivo salvato in reports/objective_breakdown.csv
 ```bash
 # Aumenta peso preferenze
 python -m src.model_cp \
-  --data-dir examples \
+  --data-dir data \
   --preferences-weight 0.5 \
   --max-seconds 30
 
 # Riduce peso straordinari
 python -m src.model_cp \
-  --data-dir examples \
+  --data-dir data \
   --overtime-priority 0.1 \
   --max-seconds 30
 ```
 
 ### **Disabilita finestre (modalità legacy)**
-Modifica `examples/config.yaml`:
+Modifica `data/config.yaml`:
 ```yaml
 windows:
   coverage_mode: "disabled"  # Invece di "adaptive_slots"

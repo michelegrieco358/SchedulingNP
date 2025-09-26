@@ -92,19 +92,19 @@ Vincolo:  persone_in_slot[07:00-14:00] ≥ 3
 
 ## Schema CSV e migrazione
 
-### **Nuovo schema (raccomandato)**
-Il nuovo schema supporta skill requirements e finestre istantanee:
+### **Schema attuale (semplificato)**
+Il sistema usa un'architettura semplificata con separazione netta dei ruoli:
 
 ```csv
-# shifts.csv (nuovo)
-shift_id,day,start,end,role,demand,skill_requirements
-S1_NURSE_MORNING,2025-10-07,06:00,14:00,nurse,2,"first_aid=1"
+# shifts.csv - Template temporali puri
+shift_id,day,start,end,role
+S1_NURSE_MORNING,2025-10-07,06:00,14:00,nurse
 ```
 
 ```csv
-# windows.csv (nuovo)
-window_id,day,window_start,window_end,role,window_demand
-WIN_NURSE_RUSH,2025-10-07,07:00,11:00,nurse,3
+# windows.csv - Requisiti completi (domanda + skill)
+window_id,day,window_start,window_end,role,window_demand,skills
+WIN_NURSE_RUSH,2025-10-07,07:00,11:00,nurse,3,"first_aid:1"
 ```
 
 ### **Schema legacy (supportato)**
@@ -278,8 +278,6 @@ Pesi di default (costo per 1 persona-ora):
 
 - 2.0 domanda aggregata di finestra (`unmet_window`)
 - 1.0 copertura del turno (`unmet_demand`)
-- 0.8 skill richieste dal turno (`unmet_skill`)
-- 0.6 minimi di turno soft (`unmet_shift`)
 - 0.3 straordinario (`overtime`)
 - 0.05 fairness sul carico (`fairness`)
 - 0.05 preferenze (`preferences`)
@@ -289,8 +287,6 @@ Il solver minimizza:
 ```
 min  2.0 * sum_W  H_W * short_window_W
     + 1.0 * sum_s  H_s * shortfall_s
-    + 0.8 * sum_{s,k} H_s * short_skill_{s,k}
-    + 0.6 * sum_s  H_s * short_shift_soft_s
     + 0.3 * sum_e  overtime_hours_e
     + 0.05 * fairness_hours
     + 0.01 * sum_{(e,s)} (-score_es) * H_avg
@@ -375,10 +371,6 @@ Mettere i CSV in `data/` (o passa `--data-dir`).
 | start          | time | `HH:MM`                                                                     |
 | end            | time | `HH:MM` (se `end <= start` indica turno cross-midnight)                     |
 | role           | str  | ruolo richiesto                                                             |
-| required_staff | int  | (legacy) minimo hard per turno; se assente viene rimpiazzato da `demand` |
-| demand         | int  | domanda minima soft; se la colonna manca viene usato `required_staff`      |
-| demand_id      | str  | legacy: identifica la finestra in `demand_windows.csv`                      |
-| skill_requirements | str  | opzionale: requisiti di skill (`{{"muletto":1}}` o `muletto=1,primo=1`)    |
 
 > Il pre-processing genera `start_dt`, `end_dt` e `duration_h`, gestendo i casi cross-midnight.
 ### `windows.csv` (nuovo schema)
@@ -450,9 +442,8 @@ Mettere i CSV in `data/` (o passa `--data-dir`).
 
 ## Configurazione
 
-- Pesi di default (persona-ora): unmet_window=2.0, unmet_demand=1.0, unmet_skill=0.8, unmet_shift=0.6, overtime=0.3, fairness=0.05, preferences=0.05.
+- Pesi di default (persona-ora): unmet_window=2.0, unmet_demand=1.0, overtime=0.3, fairness=0.05, preferences=0.05.
 - Il file config.yaml contiene i valori di default per ore, riposi, pesi dell'obiettivo, seed e logging.
-- Sezione `skills`: `enable_slack` attiva le variabili di shortfall per skill (true di default). `penalties.unmet_skill` imposta il peso, leggermente inferiore a `penalties.unmet_demand`.
 - Puoi passare un file alternativo con python model_cp.py --config custom.yaml. Sono supportati YAML e JSON.
 - Le chiavi mancanti usano i default dello schema; gli override da CLI restano prioritari.
 - Errori di validazione (tipi errati, priorita sconosciute, range incoerenti) producono messaggi espliciti.

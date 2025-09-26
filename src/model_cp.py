@@ -38,15 +38,6 @@ def _weight_per_hour_to_minutes(weight_hour: float | int | None) -> float:
     # Conversione diretta: peso_per_minuto = peso_per_ora / 60
     return value / 60.0
 
-def _weight_per_hour_to_int(weight_hour: float | int | None) -> int:
-    """Legacy: converte peso da persona-ora a intero scalato (per compatibilità)."""
-    if weight_hour is None:
-        return 0
-    value = float(weight_hour)
-    if value <= 0:
-        return 0
-    scaled = value * OBJECTIVE_MINUTE_SCALE / 60.0
-    return max(1, int(round(scaled)))
 
 
 BASE_WINDOW_WEIGHT_H = 2.0
@@ -57,14 +48,14 @@ BASE_OVERTIME_WEIGHT_H = 0.3
 BASE_FAIRNESS_WEIGHT_H = 0.05
 BASE_PREFERENCES_WEIGHT_H = 0.05
 
-DEFAULT_WINDOW_SHORTFALL_PRIORITY = _weight_per_hour_to_int(BASE_WINDOW_WEIGHT_H)
-DEFAULT_SHORTFALL_PRIORITY = _weight_per_hour_to_int(BASE_SHIFT_WEIGHT_H)
-DEFAULT_SKILL_SHORTFALL_PRIORITY = _weight_per_hour_to_int(BASE_SKILL_WEIGHT_H)
-DEFAULT_SHIFT_SOFT_PRIORITY = _weight_per_hour_to_int(BASE_SHIFT_SOFT_WEIGHT_H)
-DEFAULT_OVERTIME_PRIORITY = _weight_per_hour_to_int(BASE_OVERTIME_WEIGHT_H)
-DEFAULT_FAIRNESS_WEIGHT = _weight_per_hour_to_int(BASE_FAIRNESS_WEIGHT_H)
-DEFAULT_PREFERENCES_WEIGHT = _weight_per_hour_to_int(BASE_PREFERENCES_WEIGHT_H)
-DEFAULT_OVERTIME_COST_WEIGHT = _weight_per_hour_to_int(BASE_OVERTIME_WEIGHT_H)
+DEFAULT_WINDOW_SHORTFALL_PRIORITY = int(BASE_WINDOW_WEIGHT_H * 100)
+DEFAULT_SHORTFALL_PRIORITY = int(BASE_SHIFT_WEIGHT_H * 100)
+DEFAULT_SKILL_SHORTFALL_PRIORITY = int(BASE_SKILL_WEIGHT_H * 100)
+DEFAULT_SHIFT_SOFT_PRIORITY = int(BASE_SHIFT_SOFT_WEIGHT_H * 100)
+DEFAULT_OVERTIME_PRIORITY = int(BASE_OVERTIME_WEIGHT_H * 100)
+DEFAULT_FAIRNESS_WEIGHT = int(BASE_FAIRNESS_WEIGHT_H * 100)
+DEFAULT_PREFERENCES_WEIGHT = int(BASE_PREFERENCES_WEIGHT_H * 100)
+DEFAULT_OVERTIME_COST_WEIGHT = int(BASE_OVERTIME_WEIGHT_H * 100)
 DEFAULT_GLOBAL_OVERTIME_CAP_MINUTES = None
 DEFAULT_OBJECTIVE_PRIORITY = tuple(config_loader.PRIORITY_KEYS)
 
@@ -76,14 +67,15 @@ LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 def _build_objective_weights(priority: Sequence[str], penalties: Mapping[str, float | int]) -> dict[str, int]:
     weights: dict[str, int] = {}
     for key in priority:
-        weight = _weight_per_hour_to_int(penalties.get(key))
-        if weight > 0:
+        penalty = penalties.get(key)
+        if penalty is not None and penalty > 0:
+            weight = int(float(penalty) * 100)
             weights[key] = weight
     for key, penalty in penalties.items():
         if key in weights:
             continue
-        weight = _weight_per_hour_to_int(penalty)
-        if weight > 0:
+        if penalty is not None and penalty > 0:
+            weight = int(float(penalty) * 100)
             weights[key] = weight
     return weights
 
@@ -125,7 +117,6 @@ class ShiftSchedulingCpSolver:
         window_demands: Mapping[str, int] | None = None,
         window_shifts: Mapping[str, Sequence[str]] | None = None,
         window_duration_minutes: Mapping[str, int] | None = None,
-        shift_soft_demands: Mapping[str, int] | None = None,
         config: SolverConfig | None = None,
         objective_priority: Sequence[str] | None = None,
         objective_weights: Mapping[str, int] | None = None,
@@ -141,10 +132,8 @@ class ShiftSchedulingCpSolver:
         self.config = config or SolverConfig()
 
         self.emp_skills = {str(emp_id): set(skills) for emp_id, skills in (emp_skills or {}).items()}
-        self.shift_skill_requirements = {
-            str(shift_id): {str(skill): int(qty) for skill, qty in reqs.items() if int(qty) > 0}
-            for shift_id, reqs in (shift_skill_requirements or {}).items()
-        }
+        # Skills now come only from windows, not from shifts
+        self.shift_skill_requirements = {}
         valid_shift_ids = set(self.shifts["shift_id"].astype(str)) if "shift_id" in self.shifts.columns else set()
         self.window_demands = {}
         if window_demands:
@@ -167,11 +156,6 @@ class ShiftSchedulingCpSolver:
             self.window_shifts.setdefault(window_id, [])
             self.window_duration_minutes.setdefault(window_id, 60)
         self.shift_soft_demands = {}
-        if shift_soft_demands:
-            for shift_id, demand in shift_soft_demands.items():
-                demand_int = int(demand)
-                if demand_int > 0 and (not valid_shift_ids or str(shift_id) in valid_shift_ids):
-                    self.shift_soft_demands[str(shift_id)] = demand_int
 
         priority = list(objective_priority) if objective_priority is not None else list(self.config.objective_priority)
         self.objective_priority = priority
@@ -248,7 +232,7 @@ class ShiftSchedulingCpSolver:
         self.shift_to_covering_segments: dict[str, list[str]] = {}  # Mappa turno -> segmenti che copre
         self.segment_demands: dict[str, int] = {}  # Domanda per segmento (headcount o persona-minuti)
         
-        # STEP 4A: Pesi obiettivo in persona-minuti (conversione da persona-ora)
+        # Pesi obiettivo in persona-minuti (conversione da persona-ora)
         self.objective_weights_minutes: dict[str, float] = {}
         self.mean_shift_minutes: int = 60  # Media durate turni per preferenze
 
@@ -272,7 +256,6 @@ class ShiftSchedulingCpSolver:
             self.avg_shift_minutes = 60
         self.total_required_minutes = self._compute_total_required_minutes()
         
-        # STEP 4A: Inizializza pesi in persona-minuti e durate per obiettivo unificato
         self._initialize_objective_weights_minutes()
         self.mean_shift_minutes = self.avg_shift_minutes  # Per preferenze
         self._add_employee_max_hours_constraints()
@@ -1350,7 +1333,7 @@ class ShiftSchedulingCpSolver:
         return all_correct
 
     def _initialize_objective_weights_minutes(self) -> None:
-        """STEP 4A: Inizializza pesi obiettivo in persona-minuti da config (persona-ora)."""
+        """Inizializza pesi obiettivo in persona-minuti da config (persona-ora)."""
         self.objective_weights_minutes = {}
         
         # Legge i pesi dalla configurazione (interpretati come persona-ora) e converte
@@ -1377,7 +1360,7 @@ class ShiftSchedulingCpSolver:
 
 
     def extract_objective_breakdown(self, solver: cp_model.CpSolver) -> dict[str, dict[str, float]]:
-        """STEP 4B: Calcola breakdown dettagliato dell'obiettivo per componente."""
+        """Calcola breakdown dettagliato dell'obiettivo per componente."""
         breakdown = {}
         
         # 1. Finestre (modalità unica segmenti)
@@ -1507,7 +1490,7 @@ class ShiftSchedulingCpSolver:
         return breakdown
 
     def log_objective_breakdown(self, solver: cp_model.CpSolver) -> None:
-        """STEP 4B: Log compatto del breakdown obiettivo post-solve."""
+        """Log compatto del breakdown obiettivo post-solve."""
         breakdown = self.extract_objective_breakdown(solver)
         
         print("\n=== Breakdown Obiettivo (persona-minuti) ===")
@@ -1541,7 +1524,7 @@ class ShiftSchedulingCpSolver:
             print(f"Top-5 costi: {', '.join(top_5)}")
 
     def export_objective_breakdown_csv(self, solver: cp_model.CpSolver, output_path: Path) -> None:
-        """STEP 4B: Export breakdown obiettivo in CSV."""
+        """Export breakdown obiettivo in CSV."""
         breakdown = self.extract_objective_breakdown(solver)
         
         # Crea directory se non esiste
@@ -1660,19 +1643,16 @@ def _load_data(
 
     shift_soft_demand: dict[str, int] = {}
     window_shifts: dict[str, list[str]] = {}
-    if "demand" in shifts_norm.columns:
+    
+    # Map shifts to windows via demand_id (for legacy compatibility)
+    if "demand_id" in shifts_norm.columns:
         for _, row in shifts_norm.iterrows():
             shift_id = str(row["shift_id"])
-            demand_val = int(row.get("demand", 0))
-            if demand_val > 0:
-                shift_soft_demand[shift_id] = demand_val
             demand_id = str(row.get("demand_id", "")).strip()
             if demand_id:
                 if demand_id not in window_demand_map:
                     raise ValueError(f"Turno {shift_id}: demand_id '{demand_id}' non presente in windows.csv")
                 window_shifts.setdefault(demand_id, []).append(shift_id)
-    else:
-        shift_soft_demand = {}
 
     for demand_id, demand_value in window_demand_map.items():
         shift_ids = window_shifts.get(demand_id, [])
@@ -1838,7 +1818,6 @@ def main(argv: list[str] | None = None) -> int:
         window_demands=window_demand_map,
         window_shifts=window_shifts,
         window_duration_minutes=window_duration_map,
-        shift_soft_demands=shift_soft_demand,
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,

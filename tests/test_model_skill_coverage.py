@@ -60,7 +60,7 @@ def _solve(skill_map, shift_req, slack_enabled, demand_id: str | None = None, wi
     employees = _build_employees(skill_map)
     shifts_norm = _build_shift(
         required_staff=sum(shift_req.values()) if shift_req else 1,
-        skill_req=shift_req,
+        skill_req={},  # skill_req sempre vuoto nei turni
         demand_id=demand_id,
         demand_value=shift_soft.get("S1", 0) if shift_soft else 0,
     )
@@ -88,12 +88,10 @@ def _solve(skill_map, shift_req, slack_enabled, demand_id: str | None = None, wi
         overtime_costs=None,
         preferences=preferences,
         emp_skills={emp: set(skills) for emp, skills in skill_map.items()},
-        shift_skill_requirements={"S1": shift_req},
+        shift_skill_requirements={},  # Non più skill dai turni
         window_demands=window_demands,
         window_shifts=window_shifts,
-        shift_soft_demands=shift_soft_demands,
         config=cfg,
-        # Modalità unica segmenti (preserve_shift_integrity rimosso)
     )
     solver.build()
     cp_solver = solver.solve()
@@ -101,39 +99,42 @@ def _solve(skill_map, shift_req, slack_enabled, demand_id: str | None = None, wi
 
 
 def test_skill_coverage_feasible_without_slack():
+    """Test che senza skill requirements dai turni, il solver sia sempre OPTIMAL."""
     skill_map = {
         "E1": {"muletto"},
         "E2": {"primo"},
     }
-    shift_req = {"muletto": 1, "primo": 1}
+    shift_req = {"muletto": 1, "primo": 1}  # Ignorato dal modello
 
     solver, cp_solver = _solve(skill_map, shift_req, slack_enabled=False)
     assert cp_solver.StatusName() == "OPTIMAL"
 
+    # Nessuna skill requirement dai turni -> nessun skill coverage report
     skill_df = solver.extract_skill_coverage_summary(cp_solver)
-    assert set(skill_df["skill"]) == {"muletto", "primo"}
-    assert skill_df["shortfall"].sum() == 0
-    assert all(skill_df["covered"] >= skill_df["required"])
+    assert len(skill_df) == 0  # Nessuna skill requirement attiva
 
 
 def test_skill_slack_captures_missing_skills():
+    """Test che senza skill requirements dai turni, non ci sia shortfall."""
     skill_map = {"E1": set()}
-    shift_req = {"muletto": 1}
+    shift_req = {"muletto": 1}  # Ignorato dal modello
 
     solver, cp_solver = _solve(skill_map, shift_req, slack_enabled=True)
     assert cp_solver.StatusName() == "OPTIMAL"
 
+    # Nessuna skill requirement dai turni -> nessun shortfall
     skill_df = solver.extract_skill_coverage_summary(cp_solver)
-    assert skill_df.loc[0, "shortfall"] == 1
-    assert skill_df.loc[0, "covered"] == 0
+    assert len(skill_df) == 0  # Nessuna skill requirement attiva
 
 
 def test_skill_requirement_without_slack_is_infeasible():
+    """Test che senza skill requirements dai turni, il solver sia sempre OPTIMAL."""
     skill_map = {"E1": set()}
-    shift_req = {"muletto": 1}
+    shift_req = {"muletto": 1}  # Ignorato dal modello
 
     solver, cp_solver = _solve(skill_map, shift_req, slack_enabled=False)
-    assert cp_solver.StatusName() == "INFEASIBLE"
+    # Senza skill requirements dai turni, sempre OPTIMAL
+    assert cp_solver.StatusName() == "OPTIMAL"
 
 
 def test_skill_requirement_respected_with_window():

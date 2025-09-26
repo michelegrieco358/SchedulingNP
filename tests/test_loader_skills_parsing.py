@@ -28,6 +28,7 @@ E2,Bob,back,40,8,5,
 
 
 def test_load_shifts_skill_requirements_json(tmp_path):
+    """Test che skill_requirements nei turni sia sempre vuoto."""
     req = json.dumps({"muletto": 1, "primo_soccorso": 2})
     path = tmp_path / "shifts.csv"
     data = pd.DataFrame(
@@ -46,11 +47,14 @@ def test_load_shifts_skill_requirements_json(tmp_path):
     data.to_csv(path, index=False)
 
     df = loader.load_shifts(path)
+    
+    # skill_requirements è sempre vuoto
     reqs = df.loc[df["shift_id"] == "S1", "skill_requirements"].iloc[0]
-    assert reqs == {"muletto": 1, "primo_soccorso": 2}
+    assert reqs == {}
 
 
 def test_load_shifts_skill_requirements_short_form(tmp_path):
+    """Test che skill_requirements nei turni sia sempre vuoto."""
     csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,2,"muletto=1, primo=1"
 """
@@ -58,27 +62,38 @@ S1,2025-01-01,08:00,16:00,front,2,"muletto=1, primo=1"
     _write_csv(path, csv_content)
 
     df = loader.load_shifts(path)
+    
+    # skill_requirements è sempre vuoto
     reqs = df.loc[df["shift_id"] == "S1", "skill_requirements"].iloc[0]
-    assert reqs == {"muletto": 1, "primo": 1}
+    assert reqs == {}
 
 
 def test_load_shifts_skill_requirements_negative(tmp_path):
+    """Test che skill_requirements nei turni sia sempre vuoto - nessun errore di validazione."""
     csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,1,"muletto=-1"
 """
     path = tmp_path / "shifts.csv"
     _write_csv(path, csv_content)
 
-    with pytest.raises(ValueError):
-        loader.load_shifts(path)
+    df = loader.load_shifts(path)
+    
+    # skill_requirements è sempre vuoto
+    reqs = df.loc[df["shift_id"] == "S1", "skill_requirements"].iloc[0]
+    assert reqs == {}
 
 
 def test_skill_requirements_warn_if_exceed_demand(tmp_path):
+    """Test che skill_requirements nei turni sia sempre vuoto."""
     csv_content = """shift_id,day,start,end,role,demand,skill_requirements
 S1,2025-01-01,08:00,16:00,front,1,"muletto=1,primo=1"
 """
     path = tmp_path / "shifts.csv"
     _write_csv(path, csv_content)
 
-    with pytest.warns(RuntimeWarning):
-        loader.load_shifts(path)
+    df = loader.load_shifts(path)
+    
+    # skill_requirements è sempre vuoto
+    assert len(df) == 1
+    skill_req = df.iloc[0]['skill_requirements']
+    assert skill_req == {}

@@ -111,7 +111,6 @@ def _make_solver(
         shift_skill_requirements=shift_skill_req,
         window_demands=window_demand_map,
         window_shifts=window_shifts,
-        shift_soft_demands=shift_soft_demand,
         config=cfg,
         objective_priority=priority,
         objective_weights=objective_weights,
@@ -164,6 +163,7 @@ def test_window_shortfall_records_deficit():
 
 
 def test_shift_soft_demand_creates_penalized_slack():
+    """STEP 1: Test obsoleto - shift_soft_demands rimosso."""
     shift_ids = ["S1"]
     employees = _build_employees(["E1"])
     shifts_norm = _build_shifts(shift_ids, demand_id="")
@@ -176,5 +176,7 @@ def test_shift_soft_demand_creates_penalized_slack():
     solver, cp_solver = _make_solver(employees, shifts_norm, assign_mask, window_demands, window_shifts, shift_soft)
 
     assert cp_solver.StatusName() == "OPTIMAL"
-    assert cp_solver.Value(solver.shift_soft_shortfall_vars["S1"]) == 1
-    assert cp_solver.Value(solver.shortfall_vars["S1"]) == 0
+    # STEP 1: shift_soft_shortfall_vars non esiste più (domanda solo dalle finestre)
+    assert not hasattr(solver, 'shift_soft_shortfall_vars') or not solver.shift_soft_shortfall_vars
+    # Verifica che il turno abbia shortfall normale (required_staff = 1, solo 1 dipendente)
+    assert cp_solver.Value(solver.shortfall_vars["S1"]) == 0  # 1 dipendente per 1 required_staff
