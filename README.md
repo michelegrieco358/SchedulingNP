@@ -266,6 +266,7 @@ Breakdown obiettivo salvato in reports/objective_breakdown.csv
 - **Ore contrattuali e straordinari**: limiti settimanali per dipendente + overtime opzionale con costo per ruolo.
 - **Fairness (L1)**: riequilibra i minuti lavorati sul target medio dei dipendenti attivi, al netto degli shortfall.
 - **Preferenze soft**: bonus/malus per turno tramite `preferences.csv` (score -2..+2) con peso configurabile.
+- **Controllo overstaffing**: penalizza automaticamente l'assegnazione di personale in eccesso rispetto alla domanda delle finestre temporali.
 - **Pre-processing robusto**: normalizzazione orari cross-midnight, conflitti di riposo e costruzione dell'eligibility via join sui ruoli.
 
 ---
@@ -278,9 +279,12 @@ Pesi di default (costo per 1 persona-ora):
 
 - 2.0 domanda aggregata di finestra (`unmet_window`)
 - 1.0 copertura del turno (`unmet_demand`)
+- 0.8 copertura skill (`unmet_skill`)
+- 0.6 domanda soft turni (`unmet_shift`)
 - 0.3 straordinario (`overtime`)
+- 0.15 **overstaffing** (`overstaff`) - **NUOVO**
 - 0.05 fairness sul carico (`fairness`)
-- 0.05 preferenze (`preferences`)
+- 0.33 preferenze (`preferences`)
 
 Il solver minimizza:
 
