@@ -24,7 +24,7 @@ Anagrafica e regole orarie.
 ```
 employee_id,name,roles,skills,contracted_hours,max_overtime_hours,min_rest_hours
 ```
-- **roles**: ruoli che può coprire (es. `nurse|triage`).
+- **roles**: ruoli che può coprire (es. `nurse|doctor`).
 - **skills**: competenze (es. `icu,leadership`).
 - **contracted_hours**: se presente ⇒ dipendente **interno**  
   (minimo ore settimanali hard, malattia e ferie conteggiate come ore lavorate).
