@@ -154,7 +154,6 @@ def test_demand_mode_headcount(mock_employees, mock_shifts, mock_assign_mask,
         window_demands=mock_window_demands,
         window_duration_minutes=mock_window_duration_minutes,
         adaptive_slot_data=mock_adaptive_slot_data,
-        preserve_shift_integrity=True,
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -188,7 +187,6 @@ def test_demand_mode_person_minutes(mock_employees, mock_shifts, mock_assign_mas
         window_demands=mock_window_demands,
         window_duration_minutes=mock_window_duration_minutes,
         adaptive_slot_data=mock_adaptive_slot_data,
-        preserve_shift_integrity=True,
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -219,35 +217,6 @@ def test_demand_mode_person_minutes(mock_employees, mock_shifts, mock_assign_mas
             f"Segmento {segment_id}: atteso {expected_demand}, ottenuto {actual_demand}"
     
     print(f"✓ Modalità person_minutes: domande proporzionali calcolate correttamente")
-
-
-def test_demand_mode_ignored_when_preserve_shift_integrity_false(
-    mock_employees, mock_shifts, mock_assign_mask, mock_window_demands,
-    mock_window_duration_minutes, mock_adaptive_slot_data):
-    """Test che demand_mode sia ignorato quando preserve_shift_integrity=False."""
-    
-    solver = ShiftSchedulingCpSolver(
-        employees=mock_employees,
-        shifts=mock_shifts,
-        assign_mask=mock_assign_mask,
-        window_demands=mock_window_demands,
-        window_duration_minutes=mock_window_duration_minutes,
-        adaptive_slot_data=mock_adaptive_slot_data,
-        preserve_shift_integrity=False,  # ← Disabilitato
-        config=SolverConfig(max_seconds=5.0)
-    )
-    
-    # Imposta modalità headcount (dovrebbe essere ignorata)
-    solver.demand_mode = "headcount"
-    
-    # Costruisce il modello
-    solver.build()
-    
-    # Con preserve_shift_integrity=False, non dovrebbero esserci segment_demands
-    assert len(solver.segment_demands) == 0, \
-        "demand_mode dovrebbe essere ignorato quando preserve_shift_integrity=False"
-    
-    print("✓ demand_mode correttamente ignorato con preserve_shift_integrity=False")
 
 
 def test_demand_mode_comparison():
@@ -292,7 +261,7 @@ def test_demand_mode_comparison():
     solver_headcount = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_headcount.demand_mode = "headcount"
@@ -302,7 +271,7 @@ def test_demand_mode_comparison():
     solver_person_minutes = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_person_minutes.demand_mode = "person_minutes"
@@ -327,22 +296,14 @@ def test_config_integration():
     
     # Test configurazione headcount
     config_headcount = Config()
-    config_headcount.shifts = ShiftsConfig(
-        preserve_shift_integrity=True,
-        demand_mode="headcount"
-    )
+    config_headcount.shifts = ShiftsConfig(demand_mode="headcount")
     
-    assert config_headcount.shifts.preserve_shift_integrity is True
     assert config_headcount.shifts.demand_mode == "headcount"
     
     # Test configurazione person_minutes
     config_person_minutes = Config()
-    config_person_minutes.shifts = ShiftsConfig(
-        preserve_shift_integrity=True,
-        demand_mode="person_minutes"
-    )
+    config_person_minutes.shifts = ShiftsConfig(demand_mode="person_minutes")
     
-    assert config_person_minutes.shifts.preserve_shift_integrity is True
     assert config_person_minutes.shifts.demand_mode == "person_minutes"
     
     # Test validazione valori non validi

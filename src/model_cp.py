@@ -129,13 +129,8 @@ class ShiftSchedulingCpSolver:
         config: SolverConfig | None = None,
         objective_priority: Sequence[str] | None = None,
         objective_weights: Mapping[str, int] | None = None,
-        # Nuovi parametri per slot adattivi
+        # Parametri per segmentazione temporale
         adaptive_slot_data: object | None = None,
-        slots_in_window: Mapping[str, Sequence[str]] | None = None,
-        coverage_mode: str = "disabled",
-        enable_slot_slack: bool = True,
-        # Nuovo parametro per integrità turni
-        preserve_shift_integrity: bool = True,
     ) -> None:
         self.employees = employees
         self.shifts = shifts
@@ -241,23 +236,13 @@ class ShiftSchedulingCpSolver:
         else:
             self.preference_score_by_pair = {}
 
-        # Parametri per slot adattivi (STEP 3B)
+        # Parametri per segmentazione temporale
         self.adaptive_slot_data = adaptive_slot_data
-        self.slots_in_window = {str(k): list(v) for k, v in (slots_in_window or {}).items()}
-        self.coverage_mode = str(coverage_mode).lower()
-        self.enable_slot_slack = bool(enable_slot_slack)
         
-        # Variabili per vincoli di slot
-        self.slot_shortfall_vars: dict[tuple[str, str], cp_model.IntVar] = {}  # short_slot[w,t]
-        self.slot_to_covering_shifts: dict[str, list[str]] = {}  # Mappa precomputata slot -> turni che lo coprono
-        
-        # NUOVO: Parametro per preservare integrità turni
-        self.preserve_shift_integrity = bool(preserve_shift_integrity)
-        
-        # NUOVO: Modalità interpretazione domanda (solo con preserve_shift_integrity=True)
+        # Modalità interpretazione domanda
         self.demand_mode = "headcount"  # Default, sarà aggiornato dal config
         
-        # Variabili per vincoli di segmenti con turni interi (quando preserve_shift_integrity=True)
+        # Variabili per vincoli di segmenti con turni interi
         self.segment_shortfall_vars: dict[str, cp_model.IntVar] = {}  # short_segment[seg_id]
         self.shift_to_covering_segments: dict[str, list[str]] = {}  # Mappa turno -> segmenti che copre
         self.segment_demands: dict[str, int] = {}  # Domanda per segmento (headcount o persona-minuti)
@@ -275,18 +260,10 @@ class ShiftSchedulingCpSolver:
         self._add_shift_soft_demand_constraints()
         self._add_skill_coverage_constraints()
         
-        # MODALITÀ OPERATIVE DISTINTE basate su preserve_shift_integrity
-        if self.preserve_shift_integrity:
-            # MODALITÀ TURNI INTERI: usa solo vincoli basati su segmenti
-            # - NON costruisce vincoli su slot adattivi
-            # - Ottimizza solo sui turni interi per coprire la domanda di ogni segmento
-            self._add_segment_coverage_constraints()
-        else:
-            # MODALITÀ SLOT ADATTIVI: comportamento legacy
-            # - Costruisce vincoli basati su slot e finestre
-            # - Permette frammentazione dei turni tramite slot
-            self._add_window_coverage_constraints()
-            self._add_adaptive_slot_coverage_constraints()
+        # MODALITÀ UNICA: sempre turni interi con segmentazione
+        # - Usa solo vincoli basati su segmenti temporali
+        # - Ottimizza sui turni interi per coprire la domanda di ogni segmento
+        self._add_segment_coverage_constraints()
         self.duration_minutes = self._compute_shift_duration_minutes()
         if self.duration_minutes:
             avg_minutes = sum(self.duration_minutes.values()) / len(self.duration_minutes)
@@ -297,7 +274,6 @@ class ShiftSchedulingCpSolver:
         
         # STEP 4A: Inizializza pesi in persona-minuti e durate per obiettivo unificato
         self._initialize_objective_weights_minutes()
-        self._compute_slot_minutes()
         self.mean_shift_minutes = self.avg_shift_minutes  # Per preferenze
         self._add_employee_max_hours_constraints()
         self._add_one_shift_per_day_constraints()
@@ -366,25 +342,6 @@ class ShiftSchedulingCpSolver:
             assign_expr = sum(vars_for_shift) if vars_for_shift else 0
             self.model.Add(assign_expr + shortfall_var == required_staff)
 
-    def _add_window_coverage_constraints(self) -> None:
-        """Imposta la copertura per le finestre aggregate di domanda."""
-        self.window_shortfall_vars = {}
-        if not self.window_demands:
-            return
-
-        for window_id, demand in self.window_demands.items():
-            if demand <= 0:
-                continue
-            shift_ids = self.window_shifts.get(window_id, [])
-            window_vars: list[cp_model.IntVar] = []
-            for shift_id in shift_ids:
-                window_vars.extend(self._vars_by_shift.get(shift_id, []))
-            slack = self.model.NewIntVar(0, demand, f"short_window__{window_id}")
-            self.window_shortfall_vars[window_id] = slack
-            if window_vars:
-                self.model.Add(sum(window_vars) + slack >= demand)
-            else:
-                self.model.Add(slack >= demand)
 
     def _add_shift_soft_demand_constraints(self) -> None:
         """Applica i minimi di domanda per singolo turno (soft)."""
@@ -438,72 +395,6 @@ class ShiftSchedulingCpSolver:
                 else:
                     self.model.Add(assign_expr >= req)
 
-    def _add_adaptive_slot_coverage_constraints(self) -> None:
-        """Implementa vincoli di copertura istantanea per slot adattivi (STEP 3B)."""
-        self.slot_shortfall_vars = {}
-        
-        # Solo se coverage_mode == "adaptive_slots" e ci sono finestre e slot
-        if self.coverage_mode != "adaptive_slots":
-            return
-            
-        if not self.slots_in_window or not self.adaptive_slot_data:
-            return
-            
-        # Precomputa mappa slot -> turni che lo coprono per ottimizzazione
-        self._precompute_slot_to_shifts_mapping()
-        
-        slot_count = 0
-        constraint_count = 0
-        
-        # Per ogni finestra w e per ogni slot t ∈ slots_in_window[w]
-        for window_id, slot_ids in self.slots_in_window.items():
-            if window_id not in self.window_demands:
-                continue
-                
-            window_demand = self.window_demands[window_id]
-            if window_demand <= 0:
-                continue
-                
-            for slot_id in slot_ids:
-                slot_count += 1
-                
-                # Trova turni che coprono questo slot
-                covering_shifts = self.slot_to_covering_shifts.get(slot_id, [])
-                
-                # Somma delle variabili aggregate y[s] per turni che coprono lo slot
-                covering_y_vars = []
-                for shift_id in covering_shifts:
-                    y_var = self.shift_aggregate_vars.get(shift_id)
-                    if y_var is not None:
-                        covering_y_vars.append(y_var)
-                
-                # Crea variabile di slack se abilitata
-                if self.enable_slot_slack:
-                    slack_var = self.model.NewIntVar(0, window_demand, f"short_slot__{window_id}__{slot_id}")
-                    self.slot_shortfall_vars[(window_id, slot_id)] = slack_var
-                    
-                    # Vincolo: ∑_{turni s che coprono t} y[s] + short_slot[w,t] >= window_demand[w]
-                    if covering_y_vars:
-                        self.model.Add(sum(covering_y_vars) + slack_var >= window_demand)
-                    else:
-                        self.model.Add(slack_var >= window_demand)
-                else:
-                    # Vincolo hard: ∑_{turni s che coprono t} y[s] >= window_demand[w]
-                    if covering_y_vars:
-                        self.model.Add(sum(covering_y_vars) >= window_demand)
-                    # Se non ci sono turni che coprono lo slot, il vincolo è impossibile
-                    # ma questo dovrebbe essere già stato rilevato nel precompute
-                
-                constraint_count += 1
-        
-        if slot_count > 0:
-            logger.info(
-                "Vincoli slot adattivi: %d finestre, %d slot, %d vincoli (slack: %s)",
-                len(self.slots_in_window),
-                slot_count,
-                constraint_count,
-                "abilitato" if self.enable_slot_slack else "disabilitato"
-            )
 
     def _add_segment_coverage_constraints(self) -> None:
         """
@@ -617,10 +508,6 @@ class ShiftSchedulingCpSolver:
         if not self.adaptive_slot_data or not self.window_demands:
             return
             
-        # Solo applicabile quando preserve_shift_integrity=True
-        if not self.preserve_shift_integrity:
-            logger.info("demand_mode ignorato: preserve_shift_integrity=False")
-            return
             
         try:
             # Accede ai dati di segmentazione
@@ -1095,8 +982,8 @@ class ShiftSchedulingCpSolver:
             "fairness": (fairness_expr, has_fairness),
         }
         
-        # Se preserve_shift_integrity=True, usa i segmenti invece delle finestre per unmet_window
-        if self.preserve_shift_integrity and has_segment:
+        # Usa sempre i segmenti per unmet_window (modalità unica)
+        if has_segment:
             priority_map["unmet_window"] = (segment_expr, has_segment)
 
         terms = []
@@ -1403,52 +1290,15 @@ class ShiftSchedulingCpSolver:
             {k: f"{v:.4f}" for k, v in self.objective_weights_minutes.items()}
         )
 
-    def _compute_slot_minutes(self) -> None:
-        """STEP 4A: Calcola durate slot in minuti per termini finestra."""
-        self.slot_minutes = {}
-        
-        if not self.adaptive_slot_data:
-            return
-            
-        try:
-            slot_bounds = getattr(self.adaptive_slot_data, 'slot_bounds', {})
-            
-            for window_id, slot_ids in self.slots_in_window.items():
-                for slot_id in slot_ids:
-                    if slot_id in slot_bounds:
-                        start_min, end_min = slot_bounds[slot_id]
-                        duration = max(1, int(end_min - start_min))
-                        self.slot_minutes[slot_id] = duration
-                    else:
-                        # Fallback: usa durata media turni
-                        self.slot_minutes[slot_id] = self.avg_shift_minutes
-                        
-        except AttributeError as e:
-            logger.warning("Errore nel calcolo durate slot: %s", e)
-            # Fallback: tutti gli slot hanno durata media turni
-            for window_id, slot_ids in self.slots_in_window.items():
-                for slot_id in slot_ids:
-                    self.slot_minutes[slot_id] = self.avg_shift_minutes
-        
-        if self.slot_minutes:
-            total_slots = len(self.slot_minutes)
-            avg_slot_duration = sum(self.slot_minutes.values()) / total_slots
-            logger.info(
-                "Durate slot: %d slot, media %.1f min (range: %d-%d min)",
-                total_slots,
-                avg_slot_duration,
-                min(self.slot_minutes.values()) if self.slot_minutes else 0,
-                max(self.slot_minutes.values()) if self.slot_minutes else 0
-            )
 
     def extract_objective_breakdown(self, solver: cp_model.CpSolver) -> dict[str, dict[str, float]]:
         """STEP 4B: Calcola breakdown dettagliato dell'obiettivo per componente."""
         breakdown = {}
         
-        # 1. Finestre (slot adattivi)
+        # 1. Finestre (modalità unica segmenti)
         window_minutes = 0
         window_cost = 0.0
-        if self.coverage_mode == "adaptive_slots" and self.slot_shortfall_vars:
+        if hasattr(self, 'segment_shortfall_vars') and self.segment_shortfall_vars:
             weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
             for (window_id, slot_id), var in self.slot_shortfall_vars.items():
                 shortfall_units = solver.Value(var)
@@ -1914,10 +1764,9 @@ def main(argv: list[str] | None = None) -> int:
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,
-        preserve_shift_integrity=cfg.shifts.preserve_shift_integrity,
     )
     
-    # NUOVO: Imposta demand_mode dal config
+    # Imposta demand_mode dal config
     solver.demand_mode = cfg.shifts.demand_mode
     solver.build()
     cp_solver = solver.solve()

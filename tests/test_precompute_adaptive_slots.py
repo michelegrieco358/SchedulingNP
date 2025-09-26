@@ -57,6 +57,7 @@ def test_build_adaptive_slots_creates_expected_slots():
 
 
 def test_build_adaptive_slots_midnight_policy_split_vs_exclude():
+    """Test modalità unica segmenti - comportamento uniforme per turni notturni."""
     base_day = date(2025, 1, 2)
     shift_row = {
         "shift_id": "S_N",
@@ -66,26 +67,18 @@ def test_build_adaptive_slots_midnight_policy_split_vs_exclude():
         "end_min": 360,
         "crosses_midnight": True,
     }
-    cfg_split = config_loader.Config()
-    cfg_split.windows.midnight_policy = "split"
+    cfg = config_loader.Config()
+    # Modalità unica segmenti - comportamento uniforme
 
-    result_split = precompute.build_adaptive_slots(_make_shifts([shift_row]), cfg_split)
-    segs_split = result_split.segments_of_s["S_N"]
-    assert len(segs_split) == 2
-    seg0_day, _, seg0_start, seg0_end = result_split.segment_bounds[segs_split[0]]
-    seg1_day, _, seg1_start, seg1_end = result_split.segment_bounds[segs_split[1]]
+    result = precompute.build_adaptive_slots(_make_shifts([shift_row]), cfg)
+    segs = result.segments_of_s["S_N"]
+    
+    # Nella modalità unica, i turni notturni vengono sempre divisi in 2 segmenti
+    assert len(segs) == 2
+    seg0_day, _, seg0_start, seg0_end = result.segment_bounds[segs[0]]
+    seg1_day, _, seg1_start, seg1_end = result.segment_bounds[segs[1]]
     assert (seg0_day, seg0_start, seg0_end) == (base_day, 1320, 1440)
     assert (seg1_day, seg1_start, seg1_end) == (base_day + timedelta(days=1), 0, 360)
-
-    cfg_exclude = config_loader.Config()
-    cfg_exclude.windows.midnight_policy = "exclude"
-
-    result_exclude = precompute.build_adaptive_slots(_make_shifts([shift_row]), cfg_exclude)
-    segs_exclude = result_exclude.segments_of_s["S_N"]
-    assert len(segs_exclude) == 1
-    seg_info = result_exclude.segment_bounds[segs_exclude[0]]
-    assert seg_info[0] == base_day and seg_info[2:] == (1320, 1440)
-    assert base_day + timedelta(days=1) not in [key[0] for key in result_exclude.slots_by_day_role]
 
 
 def test_build_adaptive_slots_cover_segment_map():
@@ -124,7 +117,8 @@ def test_build_adaptive_slots_cover_segment_map():
     assert coverage_partial == [0, 1, 0]
 
 
-def test_build_adaptive_slots_thresholds(caplog):
+def test_build_adaptive_slots_thresholds():
+    """Test modalità unica segmenti - nessun threshold configurabile."""
     day = date(2025, 1, 4)
     # genera 3 slot distinti
     shifts = _make_shifts(
@@ -135,20 +129,20 @@ def test_build_adaptive_slots_thresholds(caplog):
         ]
     )
 
-    cfg_warn = config_loader.Config()
-    cfg_warn.windows.warn_slots_threshold = 2
-    cfg_warn.windows.hard_slots_threshold = 10
-
-    with caplog.at_level(logging.WARNING, logger="src.precompute"):
-        precompute.build_adaptive_slots(shifts, cfg_warn)
-    assert any("warn_slots_threshold" in rec.message for rec in caplog.records)
-
-    cfg_error = config_loader.Config()
-    cfg_error.windows.warn_slots_threshold = 1
-    cfg_error.windows.hard_slots_threshold = 2
-
-    with pytest.raises(RuntimeError):
-        precompute.build_adaptive_slots(shifts, cfg_error)
+    cfg = config_loader.Config()
+    # Modalità unica segmenti - nessun threshold configurabile
+    
+    # Il test verifica semplicemente che la funzione non crashi
+    result = precompute.build_adaptive_slots(shifts, cfg)
+    
+    # Verifica che abbia creato i segmenti attesi
+    slots = result.slots_by_day_role[(day, "nurse")]
+    assert len(slots) == 3  # Un slot per ogni turno
+    
+    # Verifica che ogni turno abbia il suo segmento
+    for shift_id in ["S1", "S2", "S3"]:
+        assert shift_id in result.segments_of_s
+        assert len(result.segments_of_s[shift_id]) == 1
 
 def test_map_windows_to_slots_basic_mapping():
     day = date(2025, 1, 6)

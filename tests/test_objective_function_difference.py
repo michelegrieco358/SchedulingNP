@@ -51,7 +51,7 @@ def test_objective_function_differs_between_modes():
     solver_headcount = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_headcount.demand_mode = "headcount"
@@ -61,7 +61,7 @@ def test_objective_function_differs_between_modes():
     solver_person_minutes = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_person_minutes.demand_mode = "person_minutes"
@@ -160,7 +160,7 @@ def test_objective_scaling_difference():
     solver_hc = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_hc.demand_mode = "headcount"
@@ -170,7 +170,7 @@ def test_objective_scaling_difference():
     solver_pm = ShiftSchedulingCpSolver(
         employees=employees, shifts=shifts, assign_mask=assign_mask,
         window_demands=window_demands, window_duration_minutes=window_duration_minutes,
-        adaptive_slot_data=mock_data, preserve_shift_integrity=True,
+        adaptive_slot_data=mock_data,
         config=SolverConfig(max_seconds=5.0)
     )
     solver_pm.demand_mode = "person_minutes"

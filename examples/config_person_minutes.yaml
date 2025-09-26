@@ -7,7 +7,6 @@ rest:
 skills:
   enable_slack: true
 shifts:
-  preserve_shift_integrity: true
   demand_mode: "person_minutes"  # Modalità volume di lavoro
 penalties:
   unmet_window: 2.0

@@ -29,26 +29,6 @@ class HoursConfig(BaseModel):
         return values
 
 
-class ReportConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-    output_dir: str = "reports"
-
-
-    model_config = ConfigDict(extra="forbid")
-
-    min_weekly: float = Field(0, ge=0)
-    max_weekly: float = Field(40, ge=0)
-    max_daily: float = Field(8, ge=0)
-
-    @model_validator(mode="after")
-    def check_ranges(cls, values: "HoursConfig") -> "HoursConfig":
-        if values.max_weekly < values.min_weekly:
-            raise ValueError("max_weekly deve essere >= min_weekly")
-        return values
-
-
 class RestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -64,7 +44,6 @@ class SkillsConfig(BaseModel):
 class ShiftsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    preserve_shift_integrity: bool = True
     demand_mode: str = Field("headcount")
 
     @field_validator("demand_mode")
@@ -75,51 +54,6 @@ class ShiftsConfig(BaseModel):
         if value not in modes:
             raise ValueError(f"demand_mode deve essere uno tra {sorted(modes)}")
         return value
-
-
-class ReportConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-    output_dir: str = "reports"
-
-
-
-
-class WindowsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    coverage_mode: str = Field("adaptive_slots")  # Default cambiato per preserve_shift_integrity
-    enable_slot_slack: bool = True
-    warn_slots_threshold: int = Field(500, ge=0)
-    hard_slots_threshold: int = Field(2000, ge=0)
-    midnight_policy: str = Field("split")
-
-    @field_validator("coverage_mode")
-    @classmethod
-    def validate_mode(cls, value: str) -> str:
-        modes = {"disabled", "adaptive_slots"}
-        value = value.strip().lower()
-        if value not in modes:
-            raise ValueError(f"coverage_mode deve essere uno tra {sorted(modes)}")
-        return value
-
-    @field_validator("midnight_policy")
-    @classmethod
-    def validate_midnight_policy(cls, value: str) -> str:
-        policies = {"split", "exclude"}
-        value = value.strip().lower()
-        if value not in policies:
-            raise ValueError(f"midnight_policy deve essere uno tra {sorted(policies)}")
-        return value
-
-    @model_validator(mode="after")
-    def check_thresholds(cls, values: "WindowsConfig") -> "WindowsConfig":
-        warn = values.warn_slots_threshold
-        hard = values.hard_slots_threshold
-        if hard is not None and warn is not None and hard < warn:
-            raise ValueError("hard_slots_threshold deve essere >= warn_slots_threshold")
-        return values
 
 
 class PenaltiesConfig(BaseModel):
@@ -174,6 +108,13 @@ class LoggingConfig(BaseModel):
         return value.upper()
 
 
+class ReportConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    output_dir: str = "reports"
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -181,7 +122,6 @@ class Config(BaseModel):
     rest: RestConfig = Field(default_factory=RestConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     shifts: ShiftsConfig = Field(default_factory=ShiftsConfig)
-    windows: WindowsConfig = Field(default_factory=WindowsConfig)
     penalties: PenaltiesConfig = Field(default_factory=PenaltiesConfig)
     objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)
     random: RandomConfig = Field(default_factory=RandomConfig)

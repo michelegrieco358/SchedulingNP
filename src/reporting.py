@@ -66,8 +66,8 @@ class ScheduleReporter:
         """
         coverages = []
         
-        if self.solver.preserve_shift_integrity:
-            # Modalità turni integri: usa segment_demands e segment_shortfall_vars
+        # Modalità unica turni integri: usa sempre segment_demands e segment_shortfall_vars
+        if hasattr(self.solver, 'segment_demands') and self.solver.segment_demands:
             for segment_id, demand in self.solver.segment_demands.items():
                 shortfall = self.cp_solver.Value(self.solver.segment_shortfall_vars[segment_id])
                 assigned = demand - shortfall
@@ -90,8 +90,8 @@ class ScheduleReporter:
                     shortfall=shortfall,
                     overstaffing=overstaffing
                 ))
-        else:
-            # Modalità slot adattivi: usa slot_shortfall_vars
+        elif hasattr(self.solver, 'slot_shortfall_vars') and self.solver.slot_shortfall_vars:
+            # Modalità slot adattivi: usa slot_shortfall_vars (legacy)
             for (window_id, slot_id), var in self.solver.slot_shortfall_vars.items():
                 demand = self.solver.window_demands.get(window_id, 0)
                 shortfall = self.cp_solver.Value(var)

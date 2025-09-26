@@ -55,7 +55,7 @@ E2,S2,1
 
 
 def test_adaptive_slots_vs_disabled(temp_data_dir):
-    """Test che confronta modalità adaptive_slots vs disabled."""
+    """Test modalità unica segmenti (adaptive slots rimosso)."""
     # Carica dati
     bundle = load_data_bundle(temp_data_dir)
     
@@ -65,34 +65,18 @@ def test_adaptive_slots_vs_disabled(temp_data_dir):
     if 'end_dt' in bundle.shifts_df.columns:
         bundle.shifts_df['end_dt'] = pd.to_datetime(bundle.shifts_df['end_dt'])
     
-    # Test con adaptive slots - usa dati dal bundle
-    solver_adaptive = ShiftSchedulingCpSolver(
+    # Test con modalità unica segmenti
+    solver = ShiftSchedulingCpSolver(
         employees=bundle.employees_df,
         shifts=bundle.shifts_df,
         assign_mask=bundle.assign_mask_df,
-        coverage_mode="adaptive_slots",
-        enable_slot_slack=True,
         config=SolverConfig(max_seconds=5.0)
     )
     
-    solver_adaptive.build()
+    solver.build()
     
-    # Verifica che abbia creato variabili slot (se ci sono finestre)
-    assert hasattr(solver_adaptive, 'slot_shortfall_vars')
-    
-    # Test con modalità disabled
-    solver_disabled = ShiftSchedulingCpSolver(
-        employees=bundle.employees_df,
-        shifts=bundle.shifts_df,
-        assign_mask=bundle.assign_mask_df,
-        coverage_mode="disabled",
-        config=SolverConfig(max_seconds=5.0)
-    )
-    
-    solver_disabled.build()
-    
-    # Verifica che non abbia variabili slot
-    assert len(getattr(solver_disabled, 'slot_shortfall_vars', {})) == 0
+    # Verifica che abbia creato variabili segmenti (modalità unica)
+    assert hasattr(solver, 'segment_shortfall_vars')
 
 
 def test_objective_weights_conversion():
@@ -115,7 +99,6 @@ def test_objective_weights_conversion():
         employees=employees,
         shifts=shifts,
         assign_mask=assign_mask,
-        coverage_mode="disabled",
         config=SolverConfig(max_seconds=2.0)
     )
     
@@ -165,7 +148,6 @@ def test_preferences_vs_overtime_priority():
         shifts=shifts,
         assign_mask=assign_mask,
         preferences=preferences,
-        coverage_mode="disabled",
         config=SolverConfig(max_seconds=2.0)
     )
     
@@ -184,7 +166,7 @@ def test_preferences_vs_overtime_priority():
 
 def test_solver_with_windows_data(temp_data_dir):
     """Test completo con dati reali e finestre."""
-    # Carica con adaptive slots
+    # Carica con modalità unica segmenti
     bundle = load_data_bundle(temp_data_dir)
         
     # Converti start_dt/end_dt da stringhe a datetime
@@ -197,8 +179,6 @@ def test_solver_with_windows_data(temp_data_dir):
         employees=bundle.employees_df,
         shifts=bundle.shifts_df,
         assign_mask=bundle.assign_mask_df,
-        coverage_mode="adaptive_slots",
-        enable_slot_slack=True,
         config=SolverConfig(max_seconds=5.0)
     )
     
@@ -208,47 +188,8 @@ def test_solver_with_windows_data(temp_data_dir):
     # Verifica che trovi una soluzione
     assert cp_solver.StatusName() in ["OPTIMAL", "FEASIBLE"]
     
-    # Verifica che abbia processato le finestre
-    if hasattr(bundle, 'window_demands') and bundle.window_demands:
-        assert len(solver.slot_shortfall_vars) > 0, "Dovrebbero esserci variabili slot"
-
-
-@pytest.mark.parametrize("coverage_mode,expected_slots", [
-    ("disabled", 0),
-    ("adaptive_slots", 1),  # Almeno 1 se ci sono finestre
-])
-def test_coverage_modes_parametrized(temp_data_dir, coverage_mode, expected_slots):
-    """Test parametrizzato per diverse modalità di copertura."""
-    bundle = load_data_bundle(temp_data_dir)
-        
-    # Converti start_dt/end_dt da stringhe a datetime
-    if 'start_dt' in bundle.shifts_df.columns:
-        bundle.shifts_df['start_dt'] = pd.to_datetime(bundle.shifts_df['start_dt'])
-    if 'end_dt' in bundle.shifts_df.columns:
-        bundle.shifts_df['end_dt'] = pd.to_datetime(bundle.shifts_df['end_dt'])
-    
-    solver = ShiftSchedulingCpSolver(
-        employees=bundle.employees_df,
-        shifts=bundle.shifts_df,
-        assign_mask=bundle.assign_mask_df,
-        adaptive_slot_data=getattr(bundle, 'adaptive_slot_data', None),
-        slots_in_window=getattr(bundle, 'slots_in_window', {}),
-        window_demands=getattr(bundle, 'window_demands', {}),
-        coverage_mode=coverage_mode,
-        enable_slot_slack=True,
-        config=SolverConfig(max_seconds=3.0)
-    )
-    
-    solver.build()
-    
-    # Verifica numero di variabili slot
-    actual_slots = len(getattr(solver, 'slot_shortfall_vars', {}))
-    
-    if coverage_mode == "disabled":
-        assert actual_slots == 0, "Modalità disabled non dovrebbe avere slot"
-    else:
-        # Con adaptive_slots, il numero dipende dai dati effettivi
-        assert actual_slots >= 0, "Modalità adaptive_slots dovrebbe gestire slot"
+    # Verifica che abbia processato i segmenti (modalità unica)
+    assert hasattr(solver, 'segment_shortfall_vars'), "Dovrebbero esserci variabili segmenti"
 
 
 def test_performance_budget():
@@ -275,7 +216,6 @@ def test_performance_budget():
         employees=employees,
         shifts=shifts,
         assign_mask=assign_mask,
-        coverage_mode="disabled",
         config=SolverConfig(max_seconds=1.0)  # Timeout molto basso
     )
     
@@ -320,8 +260,6 @@ def test_new_csv_schema_compatibility(temp_data_dir):
         employees=bundle.employees_df,
         shifts=bundle.shifts_df,
         assign_mask=bundle.assign_mask_df,
-        coverage_mode="adaptive_slots",
-        enable_slot_slack=True,
         config=SolverConfig(max_seconds=3.0)
     )
     
