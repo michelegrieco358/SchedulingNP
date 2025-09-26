@@ -249,7 +249,6 @@ class ShiftSchedulingCpSolver:
         
         # STEP 4A: Pesi obiettivo in persona-minuti (conversione da persona-ora)
         self.objective_weights_minutes: dict[str, float] = {}
-        self.slot_minutes: dict[str, int] = {}  # Durata slot in minuti per termini finestra
         self.mean_shift_minutes: int = 60  # Media durate turni per preferenze
 
     def build(self) -> None:
@@ -596,41 +595,6 @@ class ShiftSchedulingCpSolver:
             
         return self.avg_shift_minutes  # Fallback
 
-    def _precompute_slot_to_shifts_mapping(self) -> None:
-        """Precomputa mappa slot -> turni che coprono lo slot per ottimizzazione."""
-        self.slot_to_covering_shifts = {}
-        
-        if not self.adaptive_slot_data:
-            return
-            
-        # Accede ai dati degli slot adattivi
-        try:
-            segments_of_s = getattr(self.adaptive_slot_data, 'segments_of_s', {})
-            cover_segment = getattr(self.adaptive_slot_data, 'cover_segment', {})
-            
-            # Per ogni slot, trova tutti i turni che lo coprono
-            for window_id, slot_ids in self.slots_in_window.items():
-                for slot_id in slot_ids:
-                    covering_shifts = []
-                    
-                    # Controlla ogni turno per vedere se copre questo slot
-                    for shift_id in self.shift_aggregate_vars.keys():
-                        shift_segments = segments_of_s.get(str(shift_id), [])
-                        
-                        # Un turno copre uno slot se almeno uno dei suoi segmenti copre interamente lo slot
-                        for segment_id in shift_segments:
-                            if cover_segment.get((segment_id, slot_id), 0) == 1:
-                                covering_shifts.append(shift_id)
-                                break  # Basta un segmento che copre lo slot
-                    
-                    self.slot_to_covering_shifts[slot_id] = covering_shifts
-                    
-        except AttributeError as e:
-            logger.warning("Errore nell'accesso ai dati slot adattivi: %s", e)
-            # Fallback: nessun turno copre alcuno slot
-            for window_id, slot_ids in self.slots_in_window.items():
-                for slot_id in slot_ids:
-                    self.slot_to_covering_shifts[slot_id] = []
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
         """Pre-calcola la durata di ogni turno in minuti interi."""
@@ -1344,11 +1308,11 @@ class ShiftSchedulingCpSolver:
         window_cost = 0.0
         if hasattr(self, 'segment_shortfall_vars') and self.segment_shortfall_vars:
             weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
-            for (window_id, slot_id), var in self.slot_shortfall_vars.items():
+            for segment_id, var in self.segment_shortfall_vars.items():
                 shortfall_units = solver.Value(var)
                 if shortfall_units > 0:
-                    slot_duration = self.slot_minutes.get(slot_id, self.avg_shift_minutes)
-                    minutes = shortfall_units * slot_duration
+                    segment_duration = self._get_segment_duration_minutes(segment_id)
+                    minutes = shortfall_units * segment_duration
                     window_minutes += minutes
                     window_cost += minutes * weight_per_min
         
@@ -1628,15 +1592,8 @@ def _load_data(
             demand_id = str(row.get("demand_id", "")).strip()
             if demand_id:
                 if demand_id not in window_demand_map:
-                    raise ValueError(f"Turno {shift_id}: demand_id '{demand_id}' non presente in demand_windows.csv")
+                    raise ValueError(f"Turno {shift_id}: demand_id '{demand_id}' non presente in windows.csv")
                 window_shifts.setdefault(demand_id, []).append(shift_id)
-                expected_role = window_roles.get(demand_id)
-                role = str(row.get("role", ""))
-                if expected_role is not None and expected_role != role:
-                    warnings.warn(
-                        f"Turno {shift_id}: ruolo {role} non coincide con quello della finestra {demand_id} ({expected_role})",
-                        RuntimeWarning,
-                    )
     else:
         shift_soft_demand = {}
 
@@ -1818,12 +1775,16 @@ def main(argv: list[str] | None = None) -> int:
     print("Stato solver:", cp_solver.StatusName())
 
     # Generazione report diagnostici tramite ScheduleReporter
-    from reporting import ScheduleReporter
+    try:
+        from . import reporting
+    except ImportError:
+        import reporting
     
-    report_dir = Path(solver_cfg.report.output_dir)
+    # Usa directory reports di default se non specificata
+    report_dir = Path("reports")
     report_dir.mkdir(parents=True, exist_ok=True)
     
-    reporter = ScheduleReporter(solver, cp_solver)
+    reporter = reporting.ScheduleReporter(solver, cp_solver)
 
     # Salvataggio delle assegnazioni
     assignments_df = solver.extract_assignments(cp_solver)
@@ -1863,23 +1824,22 @@ def main(argv: list[str] | None = None) -> int:
     for term in obj_stats:
         print(f"- {term.name}: {term.value:.2f} (peso: {term.weight}, contributo: {term.contribution:.1%})")
 
-    # Report dettagliati
-    if solver_cfg.report.enabled:
-        overtime_df = solver.extract_overtime_summary(cp_solver)
-        if not overtime_df.empty:
-            overtime_df.to_csv(report_dir / "overtime_report.csv", index=False)
+    # Report dettagliati sempre abilitati
+    overtime_df = solver.extract_overtime_summary(cp_solver)
+    if not overtime_df.empty:
+        overtime_df.to_csv(report_dir / "overtime_report.csv", index=False)
 
-        shortfall_df = solver.extract_shortfall_summary(cp_solver)
-        if not shortfall_df.empty:
-            shortfall_df.to_csv(report_dir / "shortfall_report.csv", index=False)
+    shortfall_df = solver.extract_shortfall_summary(cp_solver)
+    if not shortfall_df.empty:
+        shortfall_df.to_csv(report_dir / "shortfall_report.csv", index=False)
 
-        skill_df = solver.extract_skill_coverage_summary(cp_solver)
-        if not skill_df.empty:
-            skill_df.to_csv(report_dir / "skill_coverage_report.csv", index=False)
+    skill_df = solver.extract_skill_coverage_summary(cp_solver)
+    if not skill_df.empty:
+        skill_df.to_csv(report_dir / "skill_coverage_report.csv", index=False)
 
-        preference_df = solver.extract_preference_summary(cp_solver)
-        if not preference_df.empty:
-            preference_df.to_csv(report_dir / "preference_report.csv", index=False)
+    preference_df = solver.extract_preference_summary(cp_solver)
+    if not preference_df.empty:
+        preference_df.to_csv(report_dir / "preference_report.csv", index=False)
 
     # Verifica variabili aggregate
     print("\n=== Verifica variabili aggregate y[s] ===")
