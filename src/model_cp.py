@@ -1868,48 +1868,71 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Stato solver:", cp_solver.StatusName())
 
+    # Generazione report diagnostici tramite ScheduleReporter
+    from reporting import ScheduleReporter
+    
+    report_dir = Path(solver_cfg.report.output_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    
+    reporter = ScheduleReporter(solver, cp_solver)
+
+    # Salvataggio delle assegnazioni
     assignments_df = solver.extract_assignments(cp_solver)
     if args.output is not None:
         output_path = args.output
         output_path.parent.mkdir(parents=True, exist_ok=True)
         assignments_df.to_csv(output_path, index=False)
         print(f"Assegnazioni salvate in {output_path}")
-    elif assignments_df.empty:
-        print("Nessuna assegnazione attiva da mostrare.")
-    else:
+    elif not assignments_df.empty:
         print("Assegnazioni attive (prime 10 righe):")
         print(assignments_df.head(10).to_string(index=False))
 
-    overtime_df = solver.extract_overtime_summary(cp_solver)
-    if not overtime_df.empty:
-        print("\nStraordinari (minuti per dipendente):")
-        print(overtime_df.to_string(index=False, formatters={"overtime_hours": lambda v: f"{v:.2f}"}))
-
-    shortfall_df = solver.extract_shortfall_summary(cp_solver)
-    if not shortfall_df.empty:
-        print("\nShortfall turni scoperti:")
-        print(shortfall_df.to_string(index=False))
-
-    skill_df = solver.extract_skill_coverage_summary(cp_solver)
-    if not skill_df.empty:
-        print("\nSkill coverage:")
-        print(skill_df.to_string(index=False))
-
-    preference_df = solver.extract_preference_summary(cp_solver)
-    if not preference_df.empty:
-        print("\nPreferenze assegnate:")
-        print(preference_df.to_string(index=False))
-
-    solver.log_employee_summary(cp_solver)
-
-    # STEP 4B: Breakdown obiettivo dettagliato
-    solver.log_objective_breakdown(cp_solver)
+    # Generazione report CSV
+    reporter.generate_coverage_report(report_dir / "coverage_report.csv")
+    reporter.generate_constraint_report(report_dir / "constraint_report.csv")
+    reporter.generate_objective_report(report_dir / "objective_report.csv")
     
-    # Export CSV breakdown se richiesto (opzionale)
-    breakdown_csv_path = Path("reports") / "objective_breakdown.csv"
-    solver.export_objective_breakdown_csv(cp_solver, breakdown_csv_path)
+    # Output a console dei principali indicatori
+    print("\n=== Riepilogo Diagnostico ===")
+    
+    # Copertura
+    coverage_stats = reporter.get_coverage_summary()
+    print("\nStatistiche Copertura:")
+    print(f"- Media copertura: {coverage_stats['avg_coverage']:.1%}")
+    print(f"- Segmenti sottodimensionati: {coverage_stats['understaffed_segments']}")
+    print(f"- Segmenti sovradimensionati: {coverage_stats['overstaffed_segments']}")
 
-    # Verifica che le variabili aggregate y[s] siano corrette
+    # Vincoli
+    constraint_stats = reporter.get_constraint_summary() 
+    print("\nStato Vincoli:")
+    print(f"- Vincoli violati: {constraint_stats['violated']}")
+    print(f"- Vincoli attivi: {constraint_stats['binding']}")
+    
+    # Obiettivo
+    obj_stats = reporter.get_objective_summary()
+    print("\nBreakdown Obiettivo:")
+    for term in obj_stats:
+        print(f"- {term.name}: {term.value:.2f} (peso: {term.weight}, contributo: {term.contribution:.1%})")
+
+    # Report dettagliati
+    if solver_cfg.report.enabled:
+        overtime_df = solver.extract_overtime_summary(cp_solver)
+        if not overtime_df.empty:
+            overtime_df.to_csv(report_dir / "overtime_report.csv", index=False)
+
+        shortfall_df = solver.extract_shortfall_summary(cp_solver)
+        if not shortfall_df.empty:
+            shortfall_df.to_csv(report_dir / "shortfall_report.csv", index=False)
+
+        skill_df = solver.extract_skill_coverage_summary(cp_solver)
+        if not skill_df.empty:
+            skill_df.to_csv(report_dir / "skill_coverage_report.csv", index=False)
+
+        preference_df = solver.extract_preference_summary(cp_solver)
+        if not preference_df.empty:
+            preference_df.to_csv(report_dir / "preference_report.csv", index=False)
+
+    # Verifica variabili aggregate
     print("\n=== Verifica variabili aggregate y[s] ===")
     if solver.verify_aggregate_variables(cp_solver):
         print("✓ Tutte le variabili aggregate sono corrette: y[s] = sum_e x[e,s]")

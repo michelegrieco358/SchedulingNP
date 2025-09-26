@@ -1,4 +1,7 @@
-"""Test per la funzionalità preserve_shift_integrity."""
+"""Test per la funzionalità preserve_shift_integrity.
+
+Test di regressione e casi limite per entrambe le modalità (True/False).
+"""
 import pytest
 import pandas as pd
 from src.model_cp import ShiftSchedulingCpSolver, SolverConfig

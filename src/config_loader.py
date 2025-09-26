@@ -29,6 +29,26 @@ class HoursConfig(BaseModel):
         return values
 
 
+class ReportConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    output_dir: str = "reports"
+
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_weekly: float = Field(0, ge=0)
+    max_weekly: float = Field(40, ge=0)
+    max_daily: float = Field(8, ge=0)
+
+    @model_validator(mode="after")
+    def check_ranges(cls, values: "HoursConfig") -> "HoursConfig":
+        if values.max_weekly < values.min_weekly:
+            raise ValueError("max_weekly deve essere >= min_weekly")
+        return values
+
+
 class RestConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -45,6 +65,13 @@ class ShiftsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     preserve_shift_integrity: bool = True
+
+
+class ReportConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    output_dir: str = "reports"
 
 
 
@@ -150,6 +177,7 @@ class Config(BaseModel):
     random: RandomConfig = Field(default_factory=RandomConfig)
     solver: SolverOptionsConfig = Field(default_factory=SolverOptionsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    reports: ReportConfig = Field(default_factory=ReportConfig)
 
 
 _DEFAULT_CONFIG = Config()
