@@ -231,7 +231,7 @@ def test_overtime_soft_constraint_allows_solution():
             "max_week_hours": 16,
             "min_rest_hours": 0,
             "max_overtime_hours": 16,
-            "min_hours": 16,  # Rende il lavoratore contrattualizzato (min_hours == max_hours)
+            "contracted_hours": 16,  # NUOVA LOGICA: Usa contracted_hours esplicitamente
         }
     ])
 
@@ -441,7 +441,7 @@ def test_shortfall_priority_increase_preserves_solution():
             "max_week_hours": 8,
             "min_rest_hours": 0,
             "max_overtime_hours": 16,
-            "min_hours": 8,  # Rende il lavoratore contrattualizzato (min_hours == max_hours)
+            "contracted_hours": 8,  # NUOVA LOGICA: Usa contracted_hours esplicitamente
         }
     ])
 

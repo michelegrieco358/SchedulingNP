@@ -211,6 +211,7 @@ class ShiftSchedulingCpSolver:
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_cost_weights: dict[str, int] = {}
+        self.external_worker_usage_vars: dict[str, cp_model.BoolVar] = {}  # Variabili binarie per risorse esterne
         self.preference_score_by_pair: Dict[Tuple[str, str], int] = {}
         self.global_overtime_cap_minutes: int | None = self.config.global_overtime_cap_minutes
         self.random_seed: int | None = self.config.random_seed
@@ -280,7 +281,6 @@ class ShiftSchedulingCpSolver:
         self._add_rest_conflict_constraints()
         self._add_min_rest_constraints()
         self._set_objective()
-        # TODO: aggiungere vincoli (riposi, ...)
 
     def _build_assignment_variables(self) -> None:
         """Crea una variabile binaria per ogni coppia assegnabile employee/shift."""
@@ -717,8 +717,8 @@ class ShiftSchedulingCpSolver:
 
     def _add_employee_max_hours_constraints(self) -> None:
         """
-        Gestisce ore contrattuali e straordinari per dipendente.
-        Distingue automaticamente tra lavoratori "standard" e "flessibili".
+        NUOVA LOGICA: Gestisce ore contrattuali e straordinari usando esplicitamente contracted_hours.
+        Distingue tra lavoratori contrattualizzati (contracted_hours valorizzata) e non contrattualizzati.
         """
         if not self.duration_minutes:
             raise ValueError("Le durate dei turni devono essere calcolate prima di applicare il vincolo sulle ore massime.")
@@ -730,44 +730,45 @@ class ShiftSchedulingCpSolver:
         for _, emp_row in self.employees.iterrows():
             emp_id = emp_row["employee_id"]
             
-            # Estrai parametri orari dalle colonne esistenti
-            min_h = float(emp_row.get("min_hours", 0))  # Se non presente, default 0
+            # NUOVA LOGICA: Usa contracted_hours come base per la distinzione
+            contracted_h = emp_row.get("contracted_hours")
+            min_h_raw = emp_row.get("min_hours")
+            min_h = float(min_h_raw) if pd.notna(min_h_raw) else 0.0  # Gestisce NaN correttamente
             max_h = float(emp_row["max_week_hours"])
             overtime = float(emp_row.get("max_overtime_hours", 0))
             
-            # NUOVA LOGICA: Distinzione basata su min_hours vs max_hours
-            is_contracted = (min_h == max_h)
+            # Determina se è contrattualizzato basandosi su contracted_hours
+            is_contracted = pd.notna(contracted_h)
             
             pairs = self._vars_by_emp.get(emp_id, [])
             terms = [self.duration_minutes[shift_id] * var for shift_id, var in pairs]
             assigned_expr = sum(terms) if terms else 0
 
             if is_contracted:
-                # 🧰 Caso 1: Lavoratore CONTRATTUALIZZATO (min_hours == max_hours)
-                # - Tratta min_hours come "contracted_hours"
+                # 🧰 Caso 1: Lavoratore CONTRATTUALIZZATO (contracted_hours valorizzata)
+                # - Usa contracted_hours come base per i vincoli
                 # - Permetti straordinari se specificati
                 # - Considera le assenze (time_off) come ore già conteggiate verso il contratto
                 
-                contracted_minutes = int(min_h * 60)
+                contracted_minutes = int(float(contracted_h) * 60)
                 overtime_var = self.model.NewIntVar(0, int(overtime * 60), f"overtime_min__{emp_id}")
                 self.overtime_vars[emp_id] = overtime_var
                 
-                # TODO: Calcolare time_off_minutes per questo dipendente
-                # Per ora assumiamo 0, ma dovrebbe essere calcolato dai dati time_off
-                time_off_minutes = 0  # Placeholder
+                # Calcola time_off_minutes per questo dipendente
+                time_off_minutes = self._calculate_time_off_minutes(emp_id)
                 
                 # Vincoli: worked_minutes + time_off_minutes >= contracted_minutes
                 #          worked_minutes + time_off_minutes <= contracted_minutes + overtime_minutes
                 self.model.Add(assigned_expr + time_off_minutes >= contracted_minutes)
                 self.model.Add(assigned_expr + time_off_minutes <= contracted_minutes + overtime_var)
                 
-                logger.debug(f"Worker {emp_id}: CONTRATTUALIZZATO - contracted={min_h}h, overtime_max={overtime}h")
+                logger.debug(f"Worker {emp_id}: CONTRATTUALIZZATO - contracted={contracted_h}h, overtime_max={overtime}h, time_off={time_off_minutes}min")
                 
             else:
-                # 📊 Caso 2: Lavoratore NON CONTRATTUALIZZATO (min_hours < max_hours)
-                # - Il numero di ore può variare liberamente nell'intervallo [min_hours, max_hours]
-                # - Non considerare time_off come vincolo quantitativo
-                # - Lavoratori non contrattualizzati non hanno straordinari
+                # 📊 Caso 2: Lavoratore NON CONTRATTUALIZZATO (contracted_hours vuota)
+                # - Usa min_hours e max_week_hours per definire i limiti orari
+                # - Vincoli condizionali: può non essere usato (0 ore) oppure nel range [min_hours, max_hours]
+                # - NON creare variabili di overtime
                 
                 min_minutes = int(min_h * 60)
                 max_minutes = int(max_h * 60)
@@ -775,12 +776,23 @@ class ShiftSchedulingCpSolver:
                 # Nessuna variabile straordinari per lavoratori non contrattualizzati
                 self.overtime_vars[emp_id] = self.model.NewIntVar(0, 0, f"overtime_min__{emp_id}")  # Sempre 0
                 
-                # Vincoli semplici: worked_minutes >= min_minutes
-                #                   worked_minutes <= max_minutes
-                self.model.Add(assigned_expr >= min_minutes)
-                self.model.Add(assigned_expr <= max_minutes)
+                # VINCOLI CONDIZIONALI: Usa solo se conveniente
+                # Variabile binaria: risorsa esterna è utilizzata?
+                use_external = self.model.NewBoolVar(f"use_external__{emp_id}")
+                self.external_worker_usage_vars[emp_id] = use_external
                 
-                logger.debug(f"Worker {emp_id}: NON CONTRATTUALIZZATO - min={min_h}h, max={max_h}h (no overtime)")
+                # Se non usata: 0 ore (senza penalità)
+                self.model.Add(assigned_expr == 0).OnlyEnforceIf(use_external.Not())
+                
+                # Se usata: deve essere nel range [min_minutes, max_minutes]
+                self.model.Add(assigned_expr >= min_minutes).OnlyEnforceIf(use_external)
+                self.model.Add(assigned_expr <= max_minutes).OnlyEnforceIf(use_external)
+                
+                # Collegamento logico: se assigned_expr > 0 allora use_external = True
+                self.model.Add(assigned_expr > 0).OnlyEnforceIf(use_external)
+                self.model.Add(assigned_expr == 0).OnlyEnforceIf(use_external.Not())
+                
+                logger.debug(f"Worker {emp_id}: RISORSA ESTERNA - min={min_h}h, max={max_h}h (attivazione condizionale)")
 
             total_possible_ot += int(overtime * 60)
             self.overtime_cost_weights[emp_id] = self._resolve_overtime_cost_weight(emp_row)
@@ -791,6 +803,39 @@ class ShiftSchedulingCpSolver:
             self.model.Add(sum(self.overtime_vars.values()) <= cap_minutes)
         else:
             self.global_overtime_cap_minutes = None
+
+    def _calculate_time_off_minutes(self, emp_id: str) -> int:
+        """
+        Calcola i minuti di time_off per un dipendente specifico.
+        
+        Questo metodo somma tutti i minuti di assenza (ferie, malattie, etc.) 
+        per il dipendente specificato nel periodo di schedulazione.
+        
+        Args:
+            emp_id: ID del dipendente
+            
+        Returns:
+            Totale minuti di time_off per il dipendente
+        """
+        # Per ora restituisce 0 come placeholder
+        # In una implementazione completa, questo metodo dovrebbe:
+        # 1. Accedere ai dati time_off dal loader (self.time_off_data)
+        # 2. Filtrare per emp_id nel periodo di schedulazione
+        # 3. Calcolare l'intersezione temporale con i turni
+        # 4. Sommare i minuti totali di assenza
+        
+        # Esempio di implementazione futura:
+        # if hasattr(self, 'time_off_data') and self.time_off_data is not None:
+        #     emp_time_off = self.time_off_data[self.time_off_data['employee_id'] == emp_id]
+        #     total_minutes = 0
+        #     for _, row in emp_time_off.iterrows():
+        #         start_dt = pd.to_datetime(row['start_datetime'])
+        #         end_dt = pd.to_datetime(row['end_datetime'])
+        #         duration_hours = (end_dt - start_dt).total_seconds() / 3600
+        #         total_minutes += int(duration_hours * 60)
+        #     return total_minutes
+        
+        return 0
 
     def _resolve_overtime_cost_weight(self, emp_row: pd.Series) -> int:
         roles_set = emp_row.get("roles_set", set())

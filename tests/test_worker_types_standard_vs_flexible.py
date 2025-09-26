@@ -97,8 +97,8 @@ def test_standard_worker_with_equal_min_max():
 
 
 def test_flexible_worker():
-    """Test Caso C: lavoratore non contrattualizzato (min_hours < max_hours)."""
-    # Dipendente non contrattualizzato: min_hours=10, max=30h (NO straordinari)
+    """Test Caso C: risorsa esterna (min_hours < max_hours) - vincoli condizionali."""
+    # Risorsa esterna: min_hours=10, max=30h (attivazione condizionale)
     employees = pd.DataFrame([
         {"employee_id": "E1", "name": "Carol", "roles": "nurse", "max_week_hours": 30,
          "min_rest_hours": 8, "max_overtime_hours": 5, "skills": "", "min_hours": 10},
@@ -131,13 +131,17 @@ def test_flexible_worker():
     
     assert cp_solver.StatusName() in ["OPTIMAL", "FEASIBLE"]
     
-    # Verifica che il lavoratore abbia almeno min_hours=10 e massimo max_hours=30
+    # NUOVA LOGICA: Vincoli condizionali
     assignments = solver.extract_assignments(cp_solver)
     total_minutes = len(assignments) * 480  # 480 min per turno
-    assert total_minutes >= 600   # Almeno 10 ore (min_hours)
-    assert total_minutes <= 1800  # Massimo 30 ore (max_hours, NO straordinari)
     
-    # Verifica che NON ci siano straordinari (lavoratori non contrattualizzati non ne hanno)
+    if total_minutes > 0:
+        # SE usata, ALLORA deve essere nel range [min_hours, max_hours]
+        assert total_minutes >= 600   # Almeno 10 ore (min_hours)
+        assert total_minutes <= 1800  # Massimo 30 ore (max_hours, NO straordinari)
+    # ALTRIMENTI può essere 0 ore (senza penalità)
+    
+    # Verifica che NON ci siano straordinari (risorse esterne non ne hanno)
     overtime = solver.extract_overtime_summary(cp_solver)
     if not overtime.empty:
         assert overtime["overtime_minutes"].sum() == 0

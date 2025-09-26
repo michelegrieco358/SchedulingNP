@@ -90,35 +90,7 @@ class ScheduleReporter:
                     shortfall=shortfall,
                     overstaffing=overstaffing
                 ))
-        elif hasattr(self.solver, 'slot_shortfall_vars') and self.solver.slot_shortfall_vars:
-            # Modalità slot adattivi: usa slot_shortfall_vars (legacy)
-            for (window_id, slot_id), var in self.solver.slot_shortfall_vars.items():
-                demand = self.solver.window_demands.get(window_id, 0)
-                shortfall = self.cp_solver.Value(var)
-                assigned = demand - shortfall
-                overstaffing = max(0, assigned - demand)
-                
-                try:
-                    if self.solver.adaptive_slot_data:
-                        start_min, end_min = self.solver.adaptive_slot_data.slot_bounds[slot_id]
-                    else:
-                        # Usa i bounds del segmento se non ci sono slot
-                        start_min, end_min = self.solver.adaptive_slot_data.segment_bounds[window_id]
-                    start_time = f"{start_min // 60:02d}:{start_min % 60:02d}"
-                    end_time = f"{end_min // 60:02d}:{end_min % 60:02d}"
-                except (AttributeError, KeyError):
-                    start_time = "??:??"
-                    end_time = "??:??"
-                
-                coverages.append(SegmentCoverage(
-                    segment_id=f"{window_id}_{slot_id}",
-                    start_time=start_time,
-                    end_time=end_time,
-                    demand=demand,
-                    assigned=assigned,
-                    shortfall=shortfall,
-                    overstaffing=overstaffing
-                ))
+        # Modalità slot adattivi rimossa - ora usa solo segment_shortfall_vars
         
         # Converti in DataFrame
         columns = ["segment_id", "start_time", "end_time", "demand", "assigned", "shortfall", "overstaffing"]
