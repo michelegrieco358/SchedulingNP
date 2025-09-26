@@ -1,6 +1,7 @@
 # Shift Scheduling - NP-Hard 
 
-Un motore di pianificazione turni avanzato basato su **OR-Tools CP-SAT** che:
+Un motore di pianificazione turni avanzato basato su **OR-Tools CP-SAT**. 
+Caratteristiche principali:
 - prevede la presenza di **vincoli hard**: da rispettare necessariamente, se non è possibile l'istanza del problema si dichiara **infeasible**.
 - prevede la presenza di **vincoli soft**: si cerca di rispettarli, se non è possibile si assegnano **penalità, da minimizzare nella funzione obiettivo.**
 - prevede l'assegnazione di **turni intesi come contenitori temporali indivisibili (ne viene sempre preservata l'integrità)**
