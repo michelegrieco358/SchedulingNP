@@ -124,6 +124,8 @@ class ShiftSchedulingCpSolver:
         objective_weights: Mapping[str, int] | None = None,
         # Parametri per segmentazione temporale
         adaptive_slot_data: object | None = None,
+        # Dati time_off per calcolo ore contrattuali
+        time_off_data: pd.DataFrame | None = None,
     ) -> None:
         self.employees = employees
         self.shifts = shifts
@@ -226,6 +228,9 @@ class ShiftSchedulingCpSolver:
 
         # Parametri per segmentazione temporale
         self.adaptive_slot_data = adaptive_slot_data
+        
+        # Dati time_off per calcolo ore contrattuali
+        self.time_off_data = time_off_data
         
         # Modalità interpretazione domanda
         self.demand_mode = "headcount"  # Default, sarà aggiornato dal config
@@ -835,25 +840,52 @@ class ShiftSchedulingCpSolver:
         Returns:
             Totale minuti di time_off per il dipendente
         """
-        # Per ora restituisce 0 come placeholder
-        # In una implementazione completa, questo metodo dovrebbe:
-        # 1. Accedere ai dati time_off dal loader (self.time_off_data)
-        # 2. Filtrare per emp_id nel periodo di schedulazione
-        # 3. Calcolare l'intersezione temporale con i turni
-        # 4. Sommare i minuti totali di assenza
+        if not hasattr(self, 'time_off_data') or self.time_off_data is None or self.time_off_data.empty:
+            return 0
+            
+        # Filtra time_off per questo dipendente
+        emp_time_off = self.time_off_data[self.time_off_data['employee_id'] == emp_id]
+        if emp_time_off.empty:
+            return 0
+            
+        total_minutes = 0
         
-        # Esempio di implementazione futura:
-        # if hasattr(self, 'time_off_data') and self.time_off_data is not None:
-        #     emp_time_off = self.time_off_data[self.time_off_data['employee_id'] == emp_id]
-        #     total_minutes = 0
-        #     for _, row in emp_time_off.iterrows():
-        #         start_dt = pd.to_datetime(row['start_datetime'])
-        #         end_dt = pd.to_datetime(row['end_datetime'])
-        #         duration_hours = (end_dt - start_dt).total_seconds() / 3600
-        #         total_minutes += int(duration_hours * 60)
-        #     return total_minutes
+        # Per ogni periodo di time_off del dipendente
+        for _, row in emp_time_off.iterrows():
+            try:
+                # Ottieni start e end datetime del time_off
+                if pd.notna(row.get('start_datetime')) and pd.notna(row.get('end_datetime')):
+                    start_dt = pd.to_datetime(row['start_datetime'])
+                    end_dt = pd.to_datetime(row['end_datetime'])
+                else:
+                    # Fallback: usa day + start_time/end_time
+                    day = pd.to_datetime(row['day'])
+                    start_time = row.get('start_time', '00:00')
+                    end_time = row.get('end_time', '24:00')
+                    
+                    # Gestisce end_time = '24:00' come giorno successivo 00:00
+                    if end_time == '24:00':
+                        end_time = '00:00'
+                        end_day = day + pd.Timedelta(days=1)
+                    else:
+                        end_day = day
+                    
+                    start_dt = pd.to_datetime(f"{day.date()} {start_time}")
+                    end_dt = pd.to_datetime(f"{end_day.date()} {end_time}")
+                
+                # Calcola durata in minuti
+                duration_seconds = (end_dt - start_dt).total_seconds()
+                duration_minutes = int(duration_seconds / 60)
+                
+                if duration_minutes > 0:
+                    total_minutes += duration_minutes
+                    
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Errore nel calcolo time_off per {emp_id}: {e}")
+                continue
         
-        return 0
+        logger.debug(f"Worker {emp_id}: calcolati {total_minutes} minuti di time_off")
+        return total_minutes
 
     def _resolve_overtime_cost_weight(self, emp_row: pd.Series) -> int:
         roles_set = emp_row.get("roles_set", set())
@@ -1811,6 +1843,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("Nessuna domanda aggregata attiva")
 
+    # Carica time_off per passarlo al solver
+    time_off = loader.load_time_off(args.data_dir / "time_off.csv", employees)
+    
     solver = ShiftSchedulingCpSolver(
         employees=employees,
         shifts=shifts_norm,
@@ -1826,6 +1861,7 @@ def main(argv: list[str] | None = None) -> int:
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,
+        time_off_data=time_off,
     )
     
     # Imposta demand_mode dal config
