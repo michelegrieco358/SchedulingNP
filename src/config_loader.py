@@ -39,7 +39,7 @@ class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable_slack: bool = True
-    skill_mode: str = Field("by_segment")
+    skill_mode: str = Field("by_shift")
 
     @field_validator("skill_mode")
     @classmethod

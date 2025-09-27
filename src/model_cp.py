@@ -124,8 +124,6 @@ class ShiftSchedulingCpSolver:
         objective_weights: Mapping[str, int] | None = None,
         # Parametri per segmentazione temporale
         adaptive_slot_data: object | None = None,
-        # Dati time_off per calcolo ore contrattuali
-        time_off_data: pd.DataFrame | None = None,
     ) -> None:
         self.employees = employees
         self.shifts = shifts
@@ -136,22 +134,20 @@ class ShiftSchedulingCpSolver:
         self.config = config or SolverConfig()
 
         self.emp_skills = {str(emp_id): set(skills) for emp_id, skills in (emp_skills or {}).items()}
-        
-        # Gestione skill requirements (mantenuta per compatibilità)
+        # Skills now come only from windows, not from shifts
         self.shift_skill_requirements = {}
-        if shift_skill_requirements:
-            for shift_id, requirements in shift_skill_requirements.items():
-                if requirements:
-                    self.shift_skill_requirements[str(shift_id)] = dict(requirements)
-        
-        # NUOVO: Solo finestre temporali, nessun requisito dai turni
+        valid_shift_ids = set(self.shifts["shift_id"].astype(str)) if "shift_id" in self.shifts.columns else set()
         self.window_demands = {}
         if window_demands:
             for window_id, demand in window_demands.items():
                 demand_int = int(demand)
                 if demand_int > 0:
                     self.window_demands[str(window_id)] = demand_int
-        
+        provided_window_shifts = window_shifts or {}
+        self.window_shifts = {
+            str(window_id): [str(shift_id) for shift_id in shifts_list if str(shift_id) in valid_shift_ids]
+            for window_id, shifts_list in provided_window_shifts.items()
+        }
         window_duration_src = window_duration_minutes or {}
         self.window_duration_minutes = {
             str(window_id): max(1, int(duration))
@@ -159,7 +155,9 @@ class ShiftSchedulingCpSolver:
             if int(duration) > 0
         }
         for window_id in self.window_demands:
+            self.window_shifts.setdefault(window_id, [])
             self.window_duration_minutes.setdefault(window_id, 60)
+        self.shift_soft_demands = {}
 
         priority = list(objective_priority) if objective_priority is not None else list(self.config.objective_priority)
         self.objective_priority = priority
@@ -193,10 +191,9 @@ class ShiftSchedulingCpSolver:
         self._vars_by_shift: dict[str, list[cp_model.BoolVar]] = {}
         self._vars_by_shift_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
         self._vars_by_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
-        # Variabili per finestre e segmenti
+        self.shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_overstaff_vars: dict[str, cp_model.IntVar] = {}
-        self.shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.shift_soft_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
@@ -230,15 +227,11 @@ class ShiftSchedulingCpSolver:
         # Parametri per segmentazione temporale
         self.adaptive_slot_data = adaptive_slot_data
         
-        # Dati time_off per calcolo ore contrattuali
-        self.time_off_data = time_off_data
-        
         # Modalità interpretazione domanda
         self.demand_mode = "headcount"  # Default, sarà aggiornato dal config
         
         # Variabili per vincoli di segmenti con turni interi
         self.segment_shortfall_vars: dict[str, cp_model.IntVar] = {}  # short_segment[seg_id]
-        self.segment_overstaff_vars: dict[str, cp_model.IntVar] = {}  # overstaff_segment[seg_id]
         self.shift_to_covering_segments: dict[str, list[str]] = {}  # Mappa turno -> segmenti che copre
         self.segment_demands: dict[str, int] = {}  # Domanda per segmento (headcount o persona-minuti)
         
@@ -247,23 +240,23 @@ class ShiftSchedulingCpSolver:
         self.mean_shift_minutes: int = 60  # Media durate turni per preferenze
 
     def build(self) -> None:
-        """Costruisce variabili e vincoli base."""
+        """Costruisce variabili e vincoli base (placeholder)."""
         self._build_assignment_variables()
         self._build_shift_aggregate_variables()
-        
-        # Vincoli di copertura base (sempre necessari)
         self._add_shift_coverage_constraints()
+        self._add_shift_soft_demand_constraints()
+        self._add_skill_coverage_constraints()
         
-        # Vincoli aggiuntivi basati su segmenti (se disponibili)
+        # MODALITÀ UNICA: sempre turni interi con segmentazione
+        # - Usa solo vincoli basati su segmenti temporali
+        # - Ottimizza sui turni interi per coprire la domanda di ogni segmento
         self._add_segment_coverage_constraints()
-        
         self.duration_minutes = self._compute_shift_duration_minutes()
         if self.duration_minutes:
             avg_minutes = sum(self.duration_minutes.values()) / len(self.duration_minutes)
             self.avg_shift_minutes = max(1, int(round(avg_minutes)))
         else:
             self.avg_shift_minutes = 60
-        
         self.total_required_minutes = self._compute_total_required_minutes()
         
         self._initialize_objective_weights_minutes()
@@ -335,6 +328,59 @@ class ShiftSchedulingCpSolver:
             self.model.Add(assign_expr + shortfall_var == required_staff)
 
 
+    def _add_shift_soft_demand_constraints(self) -> None:
+        """Applica i minimi di domanda per singolo turno (soft)."""
+        self.shift_soft_shortfall_vars = {}
+        if not self.shift_soft_demands:
+            return
+
+        for shift_id, demand in self.shift_soft_demands.items():
+            if demand <= 0:
+                continue
+            # Usa la variabile aggregata y[s] invece di sum(x[e,s])
+            y_var = self.shift_aggregate_vars.get(shift_id)
+            slack = self.model.NewIntVar(0, demand, f"short_shift_soft__{shift_id}")
+            self.shift_soft_shortfall_vars[shift_id] = slack
+            if y_var is not None:
+                self.model.Add(y_var + slack >= demand)
+            else:
+                self.model.Add(slack >= demand)
+
+
+    def _add_skill_coverage_constraints(self) -> None:
+        """Gestisce i requisiti di skill per ciascun turno."""
+        self.skill_shortfall_vars = {}
+        if not self.shift_skill_requirements:
+            return
+
+        for shift_id, requirements in self.shift_skill_requirements.items():
+            if not requirements:
+                continue
+            vars_with_emp = self._vars_by_shift_emp.get(shift_id, [])
+            for skill_name, required in requirements.items():
+                req = int(required)
+                if req <= 0:
+                    continue
+                eligible_vars = [
+                    var
+                    for emp_id, var in vars_with_emp
+                    if skill_name in self.emp_skills.get(emp_id, set())
+                ]
+                if not eligible_vars and not self.skill_slack_enabled:
+                    print(
+                        f"[WARN] Turno {shift_id}: nessun dipendente con skill '{skill_name}' disponibile (vincolo hard)"
+                    )
+
+                assign_expr = sum(eligible_vars) if eligible_vars else 0
+                if self.skill_slack_enabled:
+                    safe_skill = ''.join(ch if ch.isalnum() or ch == '_' else '_' for ch in skill_name)
+                    slack_var = self.model.NewIntVar(0, req, f"short_skill__{shift_id}__{safe_skill}")
+                    self.skill_shortfall_vars[(shift_id, skill_name)] = slack_var
+                    self.model.Add(assign_expr + slack_var >= req)
+                else:
+                    self.model.Add(assign_expr >= req)
+
+
     def _add_segment_coverage_constraints(self) -> None:
         """
         NUOVO: Implementa vincoli di copertura per segmenti con turni interi.
@@ -391,52 +437,25 @@ class ShiftSchedulingCpSolver:
                         # Termine: segment_duration * y[shift_id]
                         covering_terms.append(segment_duration * y_var)
             
-            # Crea variabili di slack e overstaff per segmento
+            # Crea variabile di slack per segmento
             slack_var = self.model.NewIntVar(0, demand_person_minutes, f"short_segment__{segment_id}")
             self.segment_shortfall_vars[segment_id] = slack_var
             
-            # NUOVO: Variabile di overstaffing per segmento
-            # Upper bound: capacità massima teorica del segmento
-            max_capacity = sum(self._get_segment_duration_minutes(segment_id) * len(self._vars_by_shift.get(shift_id, [])) 
-                             for shift_id in covering_shifts)
-            overstaff_var = self.model.NewIntVar(0, max(max_capacity, demand_person_minutes), f"overstaff_segment__{segment_id}")
-            self.segment_overstaff_vars[segment_id] = overstaff_var
-            
-            # Vincoli: assigned = demand - shortfall + overstaff
-            # ∑_{turni che coprono segmento} capacità = domanda - slack + overstaff
+            # Vincolo: ∑_{turni che coprono segmento} capacità + slack >= domanda
             if covering_terms:
-                self.model.Add(sum(covering_terms) == demand_person_minutes - slack_var + overstaff_var)
+                self.model.Add(sum(covering_terms) + slack_var >= demand_person_minutes)
             else:
-                # Nessun turno copre il segmento -> tutto shortfall, nessun overstaff
-                self.model.Add(slack_var == demand_person_minutes)
-                self.model.Add(overstaff_var == 0)
+                # Nessun turno copre il segmento -> tutto shortfall
+                self.model.Add(slack_var >= demand_person_minutes)
             
             constraint_count += 1
         
         if segment_count > 0:
-            # Calcola statistiche per logging
-            total_demand_minutes = sum(self.segment_demands.values())
-            total_unmet_minutes = sum(
-                demand for demand in self.segment_demands.values()
-            )  # Upper bound: tutto potrebbe essere unmet
-            total_overstaff_minutes = 0  # Sarà calcolato dal solver
-            total_overtime_minutes = sum(
-                int(emp_row.get("max_overtime_hours", 0) * 60)
-                for _, emp_row in self.employees.iterrows()
-            )
-            
             logger.info(
-                "SEGMENTI BUILD: %d segmenti, %d vincoli, domanda totale %d min, "
-                "max unmet %d min, max overstaff TBD, max overtime %d min",
+                "Vincoli segmenti con turni interi: %d segmenti, %d vincoli (preserve_shift_integrity=True)",
                 segment_count,
-                constraint_count,
-                total_demand_minutes,
-                total_unmet_minutes,
-                total_overtime_minutes
+                constraint_count
             )
-            
-            # Check di capacità per diagnostica dataset
-            self._check_segment_capacity_warnings()
         else:
             logger.info("Vincoli segmenti con turni interi: nessun segmento con domanda trovato")
 
@@ -594,76 +613,6 @@ class ShiftSchedulingCpSolver:
             
         return self.avg_shift_minutes  # Fallback
 
-    def _check_segment_capacity_warnings(self) -> None:
-        """
-        Check di capacità per diagnostica dataset: emette warning se segment_demand > capacità massima teorica.
-        Serve per diagnosticare dataset con domande irrealistiche.
-        """
-        if not self.segment_demands or not self.shift_to_covering_segments:
-            return
-            
-        warnings_emitted = 0
-        
-        for segment_id, segment_demand in self.segment_demands.items():
-            if segment_demand <= 0:
-                continue
-                
-            # Trova turni che coprono questo segmento
-            covering_shifts = []
-            for shift_id, segments in self.shift_to_covering_segments.items():
-                if segment_id in segments:
-                    covering_shifts.append(shift_id)
-            
-            if not covering_shifts:
-                logger.warning(
-                    "CAPACITY CHECK: Segmento %s ha domanda %d ma nessun turno idoneo disponibile",
-                    segment_id, segment_demand
-                )
-                warnings_emitted += 1
-                continue
-            
-            # Calcola capacità massima teorica del segmento
-            max_theoretical_capacity = 0
-            segment_duration = self._get_segment_duration_minutes(segment_id)
-            
-            for shift_id in covering_shifts:
-                # Numero massimo di dipendenti assegnabili a questo turno
-                max_employees_for_shift = len(self._vars_by_shift.get(shift_id, []))
-                # Contributo di questo turno al segmento (in persona-minuti)
-                shift_contribution = max_employees_for_shift * segment_duration
-                max_theoretical_capacity += shift_contribution
-            
-            # Converti segment_demand in persona-minuti per confronto
-            if self.demand_mode == "headcount":
-                segment_demand_minutes = segment_demand * segment_duration
-            else:
-                segment_demand_minutes = segment_demand  # Già in persona-minuti
-            
-            # Emetti warning se domanda supera capacità teorica
-            if segment_demand_minutes > max_theoretical_capacity:
-                if self.demand_mode == "headcount":
-                    logger.warning(
-                        "CAPACITY CHECK: Segmento %s ha domanda %d persone (%d persona-min) "
-                        "ma capacità massima teorica è %d persona-min (turni idonei: %s)",
-                        segment_id, segment_demand, segment_demand_minutes, 
-                        max_theoretical_capacity, covering_shifts
-                    )
-                else:
-                    logger.warning(
-                        "CAPACITY CHECK: Segmento %s ha domanda %d persona-min "
-                        "ma capacità massima teorica è %d persona-min (turni idonei: %s)",
-                        segment_id, segment_demand, max_theoretical_capacity, covering_shifts
-                    )
-                warnings_emitted += 1
-        
-        if warnings_emitted > 0:
-            logger.warning(
-                "CAPACITY CHECK: %d segmenti con domanda superiore alla capacità teorica. "
-                "Verificare dataset per possibili errori di configurazione.",
-                warnings_emitted
-            )
-        else:
-            logger.info("CAPACITY CHECK: Tutti i segmenti hanno domanda compatibile con la capacità teorica")
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
         """Pre-calcola la durata di ogni turno in minuti interi."""
@@ -886,52 +835,25 @@ class ShiftSchedulingCpSolver:
         Returns:
             Totale minuti di time_off per il dipendente
         """
-        if not hasattr(self, 'time_off_data') or self.time_off_data is None or self.time_off_data.empty:
-            return 0
-            
-        # Filtra time_off per questo dipendente
-        emp_time_off = self.time_off_data[self.time_off_data['employee_id'] == emp_id]
-        if emp_time_off.empty:
-            return 0
-            
-        total_minutes = 0
+        # Per ora restituisce 0 come placeholder
+        # In una implementazione completa, questo metodo dovrebbe:
+        # 1. Accedere ai dati time_off dal loader (self.time_off_data)
+        # 2. Filtrare per emp_id nel periodo di schedulazione
+        # 3. Calcolare l'intersezione temporale con i turni
+        # 4. Sommare i minuti totali di assenza
         
-        # Per ogni periodo di time_off del dipendente
-        for _, row in emp_time_off.iterrows():
-            try:
-                # Ottieni start e end datetime del time_off
-                if pd.notna(row.get('start_datetime')) and pd.notna(row.get('end_datetime')):
-                    start_dt = pd.to_datetime(row['start_datetime'])
-                    end_dt = pd.to_datetime(row['end_datetime'])
-                else:
-                    # Fallback: usa day + start_time/end_time
-                    day = pd.to_datetime(row['day'])
-                    start_time = row.get('start_time', '00:00')
-                    end_time = row.get('end_time', '24:00')
-                    
-                    # Gestisce end_time = '24:00' come giorno successivo 00:00
-                    if end_time == '24:00':
-                        end_time = '00:00'
-                        end_day = day + pd.Timedelta(days=1)
-                    else:
-                        end_day = day
-                    
-                    start_dt = pd.to_datetime(f"{day.date()} {start_time}")
-                    end_dt = pd.to_datetime(f"{end_day.date()} {end_time}")
-                
-                # Calcola durata in minuti
-                duration_seconds = (end_dt - start_dt).total_seconds()
-                duration_minutes = int(duration_seconds / 60)
-                
-                if duration_minutes > 0:
-                    total_minutes += duration_minutes
-                    
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Errore nel calcolo time_off per {emp_id}: {e}")
-                continue
+        # Esempio di implementazione futura:
+        # if hasattr(self, 'time_off_data') and self.time_off_data is not None:
+        #     emp_time_off = self.time_off_data[self.time_off_data['employee_id'] == emp_id]
+        #     total_minutes = 0
+        #     for _, row in emp_time_off.iterrows():
+        #         start_dt = pd.to_datetime(row['start_datetime'])
+        #         end_dt = pd.to_datetime(row['end_datetime'])
+        #         duration_hours = (end_dt - start_dt).total_seconds() / 3600
+        #         total_minutes += int(duration_hours * 60)
+        #     return total_minutes
         
-        logger.debug(f"Worker {emp_id}: calcolati {total_minutes} minuti di time_off")
-        return total_minutes
+        return 0
 
     def _resolve_overtime_cost_weight(self, emp_row: pd.Series) -> int:
         roles_set = emp_row.get("roles_set", set())
@@ -1109,25 +1031,6 @@ class ShiftSchedulingCpSolver:
             return 0, False
         return sum(terms), True
 
-    def _compute_segment_overstaff_expr(self):
-        """NUOVO: Calcola l'espressione per overstaffing dei segmenti."""
-        if not self.segment_overstaff_vars:
-            return 0, False
-
-        terms = []
-        for segment_id, var in self.segment_overstaff_vars.items():
-            if self.demand_mode == "headcount":
-                # MODALITÀ HEADCOUNT: overstaff in persone, moltiplicare per durata segmento
-                segment_duration = self._get_segment_duration_minutes(segment_id)
-                terms.append(segment_duration * var)
-            else:
-                # MODALITÀ PERSON_MINUTES: overstaff già in persona-minuti
-                terms.append(var)
-
-        if not terms:
-            return 0, False
-        return sum(terms), True
-
     def _set_objective(self) -> None:
         window_expr, has_window = self._compute_window_shortfall_expr()
         shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
@@ -1137,16 +1040,14 @@ class ShiftSchedulingCpSolver:
         pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
         
-        # NUOVO: Termini per segmenti con turni interi
+        # NUOVO: Termini per segmenti con turni interi (se preserve_shift_integrity=True)
         segment_expr, has_segment = self._compute_segment_shortfall_expr()
-        overstaff_expr, has_overstaff = self._compute_segment_overstaff_expr()
 
         priority_map = {
             "unmet_window": (window_expr, has_window),
             "unmet_demand": (shortfall_expr, has_shortfall),
             "unmet_skill": (skill_expr, has_skill),
             "unmet_shift": (shift_soft_expr, has_shift_soft),
-            "overstaff": (overstaff_expr, has_overstaff),
             "overtime": (overtime_expr, has_overtime),
             "preferences": (pref_expr, has_pref),
             "fairness": (fairness_expr, has_fairness),
@@ -1910,9 +1811,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         logger.info("Nessuna domanda aggregata attiva")
 
-    # Carica time_off per passarlo al solver
-    time_off = loader.load_time_off(args.data_dir / "time_off.csv", employees)
-    
     solver = ShiftSchedulingCpSolver(
         employees=employees,
         shifts=shifts_norm,
@@ -1928,7 +1826,6 @@ def main(argv: list[str] | None = None) -> int:
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,
-        time_off_data=time_off,
     )
     
     # Imposta demand_mode dal config

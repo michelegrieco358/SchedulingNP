@@ -9,7 +9,7 @@ Caratteristiche principali:
 - prevede la presenza di vincoli (hard) contrattuali: numero massimo di ore, massimo di straordinari, riposo, ecc..
 - tiene conto delle preferenze dei dipendenti riguardo i turni che gli possono venire assegnati (vincolo soft)
 - considera la presenza di lavoratori dipendenti interni e di possibili risorse esterne, che non necessariamente devono essere attivate
-- considera un parametro chiamato fairness, che indica il workload balance: l'assegnazione di ore deve essere il piu omogenea possibile tra i dipendenti, in modo tale che gli straordinari, se previsti, non vengano concentrati su poche persone
+- considera la fairness (workload balance): l'assegnazione di ore deve essere il piu omogenea possibile tra i dipendenti, in modo tale che gli straordinari, se previsti, non vengano concentrati su poche persone
 - **la funzione obiettivo rispecchia una logica lessicografica, implementata con l'uso di pesi diversi.**
 Significa che le penalità da minimizzare nella funzione obiettivo sono ordinate per priorità e ogni priorità viene espressa da un peso numerico di un ordine di grandezza maggiore del successivo.
 In questo modo il risolutore CP-SAT minimizza prima i minuti non coperti (domanda), poi quelli senza skill, poi la quantità di straordinari, l'overstaffing, le preferenze espresse dai dipendenti e infine fairness, rispettando l’ordine di importanza desiderato. L'ordine di importanza e i pesi possono essere modificati nel file di configurazione in base alle esigenze.
@@ -132,8 +132,3 @@ solver:
 - **Overstaffing**: ammesso e inevitabile; penalizzato per ridurre l’eccesso superfluo.
 
 ---
-
-**roadmap** 
-allargare e rendere flessibile l'orizzonte temporale. Prevedere vincoli diversi su intervalli di tempo diversi (giorni, settimane, mesi)
-
-
