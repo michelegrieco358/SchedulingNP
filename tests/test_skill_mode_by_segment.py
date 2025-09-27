@@ -123,9 +123,9 @@ WIN_2,2025-10-07,16:00,23:59,nurse,1
 
 def test_config_skill_mode():
     """Test configurazione skill_mode."""
-    # Test default
+    # Test default (ora è by_segment)
     config = Config()
-    assert config.skills.skill_mode == "by_shift"
+    assert config.skills.skill_mode == "by_segment"
     
     # Test configurazione esplicita
     config_data = {
