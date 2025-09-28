@@ -18,7 +18,7 @@ except ImportError:  # fallback when running as a script
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_EMP_COLS = ["employee_id", "name", "roles", "max_week_hours", "min_rest_hours", "max_overtime_hours"]
+REQUIRED_EMP_COLS = ["employee_id", "name", "roles", "max_week_hours", "min_rest_hours", "max_overtime_hours", "contracted_hours", "min_week_hours"]
 SHIFT_BASE_COLS = ["shift_id", "day", "start", "end", "role"]
 WINDOW_BASE_COLS = ["window_id", "day", "window_start", "window_end", "role", "window_demand"]
 REQUIRED_AVAIL_COLS = ["employee_id", "shift_id", "is_available"]
@@ -31,18 +31,44 @@ def _ensure_columns(df: pd.DataFrame, required_cols: list, name: str):
         raise ValueError(f"{name}: colonne mancanti: {missing}")
 
 
+def _coerce_integer_series(
+    series: pd.Series,
+    *,
+    column: str,
+    origin: str,
+    ids: pd.Series | None = None,
+) -> pd.Series:
+    """Converte colonne numeriche in Int64 segnalando e arrotondando i valori non interi."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    rounded = numeric.round()
+    decimals_mask = numeric.notna() & (rounded != numeric)
+    if decimals_mask.any():
+        sample_preview = ""
+        if ids is not None:
+            offenders = ids.loc[decimals_mask].astype(str)
+            sample = offenders.head(5).tolist()
+            suffix = ", ..." if len(offenders) > len(sample) else ""
+            if sample:
+                sample_preview = f" (employee_id: {', '.join(sample)}{suffix})"
+        warnings.warn(
+            f'{origin}: valori non interi trovati in "{column}"{sample_preview}; arrotondo al piu vicino intero.',
+            RuntimeWarning,
+        )
+    return rounded.astype("Int64")
+
 def _parse_time_hhmm(value: str | time) -> time:
     """Parsa un orario in formato HH:MM in ``datetime.time``."""
     if isinstance(value, time):
         return value
     try:
-        minutes = parse_hhmm_to_min(str(value))
+        minutes = parse_hhmm_to_min(str(value).strip())
     except ValueError as exc:
         raise ValueError(f"Orario non valido '{value}' (atteso HH:MM)") from exc
     return _minutes_to_time(minutes)
 
 
 def _minutes_to_time(minutes: int) -> time:
+    """Converte minuti (0-1440) in datetime.time (00:00-24:00)."""
     minutes = normalize_2400(int(minutes))
     if minutes == 1440:
         return time(0, 0)
@@ -50,7 +76,7 @@ def _minutes_to_time(minutes: int) -> time:
 
 
 def _parse_date_iso(s: str) -> datetime.date:
-    """Parsa stringa della data in datetime.time. Raise error se formato non valido."""
+    """Parsa stringa della data in datetime.date. Raise error se formato non valido."""
     try:
         return dtparser.isoparse(s).date()
     except Exception as e:
@@ -58,6 +84,7 @@ def _parse_date_iso(s: str) -> datetime.date:
 
 
 def _compute_duration_minutes(start_min: int, end_min: int, shift_id: str) -> int:
+    """Calcola la durata in minuti di un turno, gestendo il caso overnight."""
     start_min = normalize_2400(int(start_min))
     end_min = normalize_2400(int(end_min))
     if end_min == start_min:
@@ -72,19 +99,34 @@ def _compute_duration_minutes(start_min: int, end_min: int, shift_id: str) -> in
     return duration
 
 
-def _parse_skill_list(value: str) -> set[str]:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+def _parse_skill_list(value) -> set[str]:
+    """Parsa una stringa di skills separate da virgola in un set di stringhe."""   
+    # 1) qualunque mancante → insieme vuoto
+    if pd.isna(value):
         return set()
+    # 2) normalizza a stringa e rimuovi spazi
     text = str(value).strip()
     if not text:
         return set()
-    tokens = [item.strip() for item in text.split(',') if item and item.strip()]
+    # difesa extra se arrivano letterali tipo "nan", "<NA>", "None"
+    if text.lower() in {"nan", "<na>", "none"}:
+        return set()
+    # 3) split sulla virgola, trim e scarto vuoti/placeholder
+    tokens = []
+    for part in text.split(","):
+        t = part.strip()
+        if not t:
+            continue
+        if t.lower() in {"nan", "<na>", "none"}:  # opzionale
+            continue
+        tokens.append(t)
+
     return set(tokens)
 
 
 def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
-    """Parse skills requirements for windows from format 'skill1:qty1,skill2:qty2'."""
-    if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+    """Parsa la colonna skills di windows.csv in un dizionario {skill: quantity}."""
+    if pd.isna(raw_value):
         return {}
     text_value = str(raw_value).strip()
     if not text_value:
@@ -116,62 +158,18 @@ def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
 def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     """
     Normalizza la colonna contracted_hours implementando la logica di rifattorizzazione:
-    
-    1. Se contracted_hours è valorizzata e min_hours != max_week_hours, mostra WARNING per incoerenza
-    2. Se contracted_hours è vuota e min_hours == max_week_hours, imposta contracted_hours = min_hours
-    3. Se contracted_hours è valorizzata ma min_hours e max_week_hours non sono presenti, imposta entrambi uguali a contracted_hours
-    4. Assicura che contracted_hours sia numerica (float) e NaN se mancante
+    1. Se contracted_hours è valorizzata e min_week_hours != max_week_hours, mostra WARNING per incoerenza
+    2. Se contracted_hours è valorizzata ma min_week_hours e/o max_week_hours non sono presenti,
+       imposta entrambi uguali a contracted_hours
+    3. Assicura che contracted_hours, min_week_hours e max_week_hours siano interi nullable (Int64)
+       e NaN se mancanti
     """
-    # Assicura che la colonna contracted_hours esista
-    if "contracted_hours" not in df.columns:
-        df["contracted_hours"] = pd.NA
-    
-    # Assicura che min_week_hours esista (può essere mancante per alcuni dipendenti)
-    if "min_week_hours" not in df.columns:
-        df["min_week_hours"] = pd.NA
-    
-    # Converte a numeric, mantenendo NaN per valori mancanti
-    df["contracted_hours"] = pd.to_numeric(df["contracted_hours"], errors="coerce")
-    df["min_week_hours"] = pd.to_numeric(df["min_week_hours"], errors="coerce")
-    
-    for idx, row in df.iterrows():
-        emp_id = row["employee_id"]
-        contracted_h = row["contracted_hours"]
-        min_h = row["min_week_hours"]
-        max_h = row["max_week_hours"]
-        
-        # Caso 1: contracted_hours valorizzata
-        if pd.notna(contracted_h):
-            # Caso 1a: Controlla incoerenza con min_week_hours e max_week_hours
-            if pd.notna(min_h) and min_h != max_h:
-                warnings.warn(
-                    f"employees.csv: Dipendente {emp_id} ha contracted_hours={contracted_h} "
-                    f"ma min_week_hours={min_h} != max_week_hours={max_h}. "
-                    f"Dati incoerenti: per lavoratori contrattualizzati min_week_hours dovrebbe essere uguale a max_week_hours.",
-                    RuntimeWarning
-                )
-            
-            # Caso 1b: Se min_week_hours e max_week_hours non sono presenti, impostali uguali a contracted_hours
-            if pd.isna(min_h):
-                df.at[idx, "min_week_hours"] = contracted_h
-                logger.debug(f"Dipendente {emp_id}: impostato min_week_hours = {contracted_h} (da contracted_hours)")
-            
-            # Per coerenza, se contracted_hours è presente, max_week_hours dovrebbe essere >= contracted_hours
-            if max_h < contracted_h:
-                warnings.warn(
-                    f"employees.csv: Dipendente {emp_id} ha max_week_hours={max_h} < contracted_hours={contracted_h}. "
-                    f"Questo potrebbe causare problemi nel modello.",
-                    RuntimeWarning
-                )
-        
-        # Caso 2: contracted_hours vuota ma min_week_hours == max_week_hours
-        elif pd.isna(contracted_h) and pd.notna(min_h) and min_h == max_h:
-            df.at[idx, "contracted_hours"] = min_h
-            logger.debug(f"Dipendente {emp_id}: impostato contracted_hours = {min_h} (min_week_hours == max_week_hours)")
-        
-        # Caso 3: contracted_hours vuota e min_week_hours != max_week_hours (o min_week_hours mancante)
-        # → Lavoratore non contrattualizzato, lascia contracted_hours come NaN
-    
+    # --- 1) Assicura che le colonne esistano ---------------------------------
+    for col in ("contracted_hours", "min_week_hours", "max_week_hours"):
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # --- 2) Converte e normalizza a interi Int64 (coercizione anticipata) ----
     for column in ("contracted_hours", "min_week_hours", "max_week_hours"):
         df[column] = _coerce_integer_series(
             df[column],
@@ -179,8 +177,44 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
             origin="employees.csv",
             ids=df.get("employee_id"),
         )
-    
-    # Log statistiche finali
+        # _coerce_integer_series:
+        #   - fa to_numeric + round
+        #   - emette warning se trova decimali
+        #   - restituisce Int64 (nullable)
+
+    # --- 3) Controlli di coerenza e riempimenti ------------------------------
+    for idx, row in df.iterrows():
+        emp_id = row["employee_id"]
+        contracted_h = row["contracted_hours"]
+        min_h = row["min_week_hours"]
+        max_h = row["max_week_hours"]
+
+        if pd.notna(contracted_h):
+            # 3a) Warning se min e max differiscono tra loro
+            if pd.notna(min_h) and pd.notna(max_h) and min_h != max_h:
+                warnings.warn(
+                    f"employees.csv: Dipendente {emp_id} ha min_week_hours={min_h} diverso da max_week_hours={max_h}",
+                    RuntimeWarning,
+                )
+            # 3b) Warning se min o max differiscono da contracted_hours
+            for hours, name in [(min_h, "min_week_hours"), (max_h, "max_week_hours")]:
+                if pd.notna(hours) and hours != contracted_h:
+                    warnings.warn(
+                        f"employees.csv: Dipendente {emp_id} ha {name}={hours} diverso da contracted_hours={contracted_h}",
+                        RuntimeWarning,
+                    )
+            # 3c) Se mancano min o max, imposta entrambi uguali a contracted_hours
+            if pd.isna(min_h) or pd.isna(max_h):
+                df.at[idx, "min_week_hours"] = contracted_h
+                df.at[idx, "max_week_hours"] = contracted_h
+                logger.debug(
+                    f"Dipendente {emp_id}: impostato min_week_hours e max_week_hours = {contracted_h} (da contracted_hours)"
+                )
+
+        # Caso 2: contracted_hours mancante e min/max diversi
+        # → lavoratore non contrattualizzato, lasciamo contracted_hours NaN
+
+    # --- 4) Statistiche finali ------------------------------------------------
     contracted_count = df["contracted_hours"].notna().sum()
     total_count = len(df)
     logger.info(
@@ -188,49 +222,38 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     )
 
 
-# Function removed - skill requirements from shifts are no longer supported
-
-
-
-
-
-def _coerce_integer_series(
-    series: pd.Series,
-    *,
-    column: str,
-    origin: str,
-    ids: pd.Series | None = None,
-) -> pd.Series:
-    """Converte colonne numeriche in Int64 segnalando e arrotondando i valori non interi."""
-    numeric = pd.to_numeric(series, errors="coerce")
-    rounded = numeric.round()
-    decimals_mask = numeric.notna() & (rounded != numeric)
-    if decimals_mask.any():
-        sample_preview = ""
-        if ids is not None:
-            offenders = ids.loc[decimals_mask].astype(str)
-            sample = offenders.head(5).tolist()
-            suffix = ", ..." if len(offenders) > len(sample) else ""
-            if sample:
-                sample_str = ", ".join(sample)
-                sample_preview = f" (employee_id: {sample_str}{suffix})"
-        warnings.warn(
-            f'{origin}: valori non interi trovati in "{column}"{sample_preview}; arrotondo al piu vicino intero.',
-            RuntimeWarning,
-        )
-    return rounded.astype("Int64")
-
-
 def load_employees(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    """Carica e normalizza employees.csv."""
+    df = pd.read_csv(path, dtype={"employee_id": "string", "name": "string", "roles": "string"})
     _ensure_columns(df, REQUIRED_EMP_COLS, "employees.csv")
 
-    # casting coerenza tipi base
-    df["employee_id"] = df["employee_id"].astype(str)
-    df["name"] = df["name"].astype(str)
-    df["roles"] = df["roles"].astype(str)
-    numeric_columns = ["max_week_hours", "min_rest_hours", "max_overtime_hours"]
-    for col in numeric_columns:
+    # 1) blocca subito NaN/vuoti su testi richiesti
+    for col in ["employee_id", "name", "roles"]:
+        s = df[col].str.strip()
+        missing = s.isna() | (s == "")
+        if missing.any():
+            righe = df.index[missing].tolist()
+            raise ValueError(f"employees.csv: valori mancanti o vuoti nella colonna '{col}' alle righe: {righe}")
+
+    # 2) normalizza testi (mantieni dtype 'string')
+    df["employee_id"] = df["employee_id"].str.strip()
+    df["name"] = df["name"].str.strip()
+    df["roles"] = df["roles"].str.strip()
+
+    # 3) skills
+    if "skills" in df.columns:
+        df["skills"] = df["skills"].astype("string").str.strip()
+    else:
+        df["skills"] = pd.Series("", index=df.index, dtype="string")
+
+    # 4) assicurati che le colonne numeriche esistano
+    all_numeric_cols = ["max_week_hours", "min_rest_hours", "min_week_hours", "contracted_hours", "max_overtime_hours"]
+    for col in all_numeric_cols:
+        if col not in df.columns:
+            df[col] = pd.NA  # verrà poi coercizzata dove opportuno
+
+    # 5) coercizza solo le numeriche NON gestite da _normalize_contracted_hours
+    for col in ("min_rest_hours", "max_overtime_hours"):
         df[col] = _coerce_integer_series(
             df[col],
             column=col,
@@ -238,114 +261,142 @@ def load_employees(path: Path) -> pd.DataFrame:
             ids=df["employee_id"],
         )
 
-    # unicità  id
+    # 6) unicità id
     if df["employee_id"].duplicated().any():
-        dups = df[df["employee_id"].duplicated()]["employee_id"].tolist()
+        dups = df.loc[df["employee_id"].duplicated(), "employee_id"].tolist()
         raise ValueError(f"employees.csv: employee_id duplicati: {dups}")
 
-    # NUOVA LOGICA: Gestione esplicita della colonna contracted_hours
+    # 7) normalizza contracted/min/max (coercizione e warning inclusi)
     _normalize_contracted_hours(df)
 
-    # crea colonna di variabili tipo set che indicano i ruoli di ogni dipendente
-    if "skills" not in df.columns:
-        df["skills"] = ""
-    df["skills"] = df["skills"].fillna("").astype(str)
+    # 8) set di skills/ruoli
     df["skills_set"] = df["skills"].apply(_parse_skill_list)
-
-    df["roles_set"] = df["roles"].apply(lambda s: set([p.strip() for p in s.split("|") if p.strip() != ""]))
+    df["roles_set"] = df["roles"].apply(lambda s: {p.strip() for p in s.split("|") if p.strip()})
     df["primary_role"] = df["roles"].apply(lambda s: s.split("|")[0].strip() if s else "")
 
-    # controlli rapidi
-    if (df["max_week_hours"] <= 0).any():
+    # 9) controlli di dominio
+    if (df["max_week_hours"].notna() & (df["max_week_hours"] <= 0)).any():
         raise ValueError("employees.csv: max_week_hours deve essere > 0")
-    if (df["min_rest_hours"] < 0).any():
+
+    if (df["min_rest_hours"].notna() & (df["min_rest_hours"] < 0)).any():
         raise ValueError("employees.csv: min_rest_hours non può essere negativo")
-    if (df["max_overtime_hours"] < 0).any():
+
+    # ok che manchi per i non contrattualizzati: controlla solo se valorizzata
+    if (df["max_overtime_hours"].notna() & (df["max_overtime_hours"] < 0)).any():
         raise ValueError("employees.csv: max_overtime_hours non può essere negativo")
 
     return df
 
 
 def load_shifts(path: Path) -> pd.DataFrame:
+    """Carica e normalizza shifts.csv."""
     df = pd.read_csv(path)
     _ensure_columns(df, SHIFT_BASE_COLS, "shifts.csv")
 
-    original_cols = set(df.columns)
+    # role non deve essere vuoto né NaN
+    s = df["role"].astype("string").str.strip()
+    missing = s.isna() | (s == "")
+    if missing.any():
+        righe = (df.index[missing] + 2).tolist()
+        raise ValueError(
+            f"shifts.csv: valori mancanti o vuoti nella colonna 'role' alle righe: {righe[:10]}"
+        )
+    df["role"] = s
 
-    df["shift_id"] = df["shift_id"].astype(str).str.strip()
+    # shift_id non vuoto + unicità
+    sid = df["shift_id"].astype("string").str.strip()
+    missing_sid = sid.isna() | (sid == "")
+    if missing_sid.any():
+        righe = (df.index[missing_sid] + 2).tolist()
+        raise ValueError(f"shifts.csv: 'shift_id' mancante/vuoto alle righe: {righe[:10]}")
+    df["shift_id"] = sid
+
     if df["shift_id"].duplicated().any():
-        dups = df[df["shift_id"].duplicated()]["shift_id"].tolist()
+        dups = df.loc[df["shift_id"].duplicated(), "shift_id"].unique().tolist()
         raise ValueError(f"shifts.csv: shift_id duplicati: {dups}")
 
-    df["day"] = df["day"].apply(_parse_date_iso)
-    df["start_min"] = df["start"].apply(parse_hhmm_to_min)
-    df["end_min"] = df["end"].apply(parse_hhmm_to_min)
+    # parsing date/orari
+    df["day"]       = df["day"].astype(str).str.strip().apply(_parse_date_iso)
+    df["start_min"] = df["start"].astype(str).str.strip().apply(parse_hhmm_to_min)
+    df["end_min"]   = df["end"].astype(str).str.strip().apply(parse_hhmm_to_min)
     df["start"] = df["start_min"].apply(_minutes_to_time)
     df["end"] = df["end_min"].apply(_minutes_to_time)
-    df["role"] = df["role"].astype(str).str.strip()
 
-    # Shifts are now pure temporal templates - no demand or skill requirements
-    df["required_staff"] = 1  # Fixed value, not used by solver
-    df["demand"] = 1  # Fixed value, not used by solver
-    df["skill_requirements"] = [{}] * len(df)  # Always empty
-
+    # flag overnight (fine <= inizio)
     df["crosses_midnight"] = df["end_min"] <= df["start_min"]
+
+    # durata in minuti/ore
     df["duration_minutes"] = df.apply(
         lambda row: _compute_duration_minutes(row["start_min"], row["end_min"], row["shift_id"]),
         axis=1,
     )
-    
-    # Add duration_h for solver compatibility
     df["duration_h"] = df["duration_minutes"] / 60.0
-    
-    # Add start_dt and end_dt for solver compatibility
+
+    # datetime completi
     df["start_dt"] = pd.to_datetime(df["day"].astype(str) + " " + df["start"].astype(str))
-    df["end_dt"] = pd.to_datetime(df["day"].astype(str) + " " + df["end"].astype(str))
-    
-    # Handle midnight crossing for end_dt
-    midnight_mask = df["crosses_midnight"]
+    df["end_dt"]   = pd.to_datetime(df["day"].astype(str) + " " + df["end"].astype(str))
+
+    # se passa al giorno dopo OPPURE finisce a 24:00, somma 1 giorno all'end_dt
+    midnight_mask = df["crosses_midnight"] | (df["end_min"] == 1440)
     df.loc[midnight_mask, "end_dt"] = df.loc[midnight_mask, "end_dt"] + pd.Timedelta(days=1)
 
+    # demand_id opzionale
     if "demand_id" not in df.columns:
         df["demand_id"] = ""
     df["demand_id"] = df["demand_id"].fillna("").astype(str).str.strip()
 
+    mean_demand = df["demand"].mean() if "demand" in df.columns else float("nan")
     summary = (
         f"shifts.csv: caricati {len(df)} turni, ruoli: {sorted(df['role'].unique())}, "
-        f"domanda media: {df['demand'].mean():.2f}"
+        f"domanda media: {mean_demand:.2f}"
     )
     logger.info(summary)
     return df
 
 
+
 def load_availability(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFrame:
-    df = pd.read_csv(path)
+    """Carica e normalizza availability.csv."""
+    df = pd.read_csv(path, dtype={"employee_id": "string", "shift_id": "string"})
     _ensure_columns(df, REQUIRED_AVAIL_COLS, "availability.csv")
 
-    df["employee_id"] = df["employee_id"].astype(str)
-    df["shift_id"] = df["shift_id"].astype(str)
+    # ID non vuoti/NaN + strip
+    for col in ["employee_id", "shift_id"]:
+        s = df[col].str.strip()
+        missing = s.isna() | (s == "")
+        if missing.any():
+            righe = (df.index[missing] + 2).tolist()
+            raise ValueError(f"availability.csv: '{col}' mancante/vuoto alle righe: {righe[:10]}")
+        df[col] = s  # normalizzato
+
+    # is_available numerico e intero
     df["is_available"] = pd.to_numeric(df["is_available"], errors="raise").astype(int)
 
     # valori ammessi 0/1
-    bad = df[~df["is_available"].isin([0, 1])]
+    bad = df.loc[~df["is_available"].isin([0, 1])]
     if not bad.empty:
-        raise ValueError("availability.csv: is_available deve essere 0 o 1")
+        righe = (bad.index + 2).tolist()
+        raise ValueError(f"availability.csv: is_available deve essere 0 o 1 (righe: {righe[:10]})")
 
     # chiavi devono esistere
     emp_set = set(employees["employee_id"])
     shift_set = set(shifts["shift_id"])
-    bad_emp = df[~df["employee_id"].isin(emp_set)]
-    bad_shift = df[~df["shift_id"].isin(shift_set)]
-    if not bad_emp.empty:
-        raise ValueError(f"availability.csv: employee_id non presenti: {sorted(set(bad_emp['employee_id']))}")
-    if not bad_shift.empty:
-        raise ValueError(f"availability.csv: shift_id non presenti: {sorted(set(bad_shift['shift_id']))}")
 
-    # dedup
-    if df.duplicated(subset=["employee_id", "shift_id"]).any():
-        raise ValueError("availability.csv: coppie (employee_id, shift_id) duplicate")
+    bad_emp = df.loc[~df["employee_id"].isin(emp_set), "employee_id"].unique().tolist()
+    bad_shift = df.loc[~df["shift_id"].isin(shift_set), "shift_id"].unique().tolist()
+    if bad_emp:
+        raise ValueError(f"availability.csv: employee_id non presenti: {bad_emp[:10]}")
+    if bad_shift:
+        raise ValueError(f"availability.csv: shift_id non presenti: {bad_shift[:10]}")
+
+    # dedup sulla coppia
+    dup_mask = df.duplicated(subset=["employee_id", "shift_id"], keep=False)
+    if dup_mask.any():
+        pairs = df.loc[dup_mask, ["employee_id", "shift_id"]].drop_duplicates().to_records(index=False).tolist()
+        raise ValueError(f"availability.csv: coppie duplicate (prime): {pairs[:10]}")
 
     return df
+
 
 
 def build_quali_mask(employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFrame:
@@ -365,6 +416,7 @@ def build_quali_mask(employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFr
 
 
 def load_overtime_costs(path: Path) -> pd.DataFrame:
+    """Carica e normalizza overtime_costs.csv."""
     df = pd.read_csv(path)
     required = ["role", "overtime_cost_per_hour"]
     _ensure_columns(df, required, path.name)
@@ -383,6 +435,7 @@ def load_overtime_costs(path: Path) -> pd.DataFrame:
 
 
 def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFrame:
+    """Carica e normalizza preferences.csv."""
     columns = ["employee_id", "shift_id", "score"]
     if not path.exists():
         return pd.DataFrame(columns=columns)
@@ -394,8 +447,8 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
     _ensure_columns(df, columns, path.name)
 
     df = df[columns].copy()
-    df["employee_id"] = df["employee_id"].astype(str)
-    df["shift_id"] = df["shift_id"].astype(str)
+    df["employee_id"] = df["employee_id"].astype(str).str.strip()
+    df["shift_id"] = df["shift_id"].astype(str).str.strip()
     df["score"] = pd.to_numeric(df["score"], errors="coerce")
 
     if df["score"].isna().any():
@@ -409,8 +462,8 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
     if df.empty:
         return pd.DataFrame(columns=columns)
 
-    df.loc[:, "score"] = df["score"].astype(int)
-    df.loc[:, "score"] = df["score"].clip(-2, 2)
+    df["score"] = df["score"].astype(int)
+    df["score"] = df["score"].clip(-2, 2)
 
     valid_employees = set(employees["employee_id"].astype(str))
     valid_shifts = set(shifts["shift_id"].astype(str))
@@ -432,40 +485,32 @@ def load_preferences(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame) 
 
 
 
-
-
 def load_windows(
     path: Path,
     shifts: pd.DataFrame | None = None,
-    *,
-    config: object | None = None,
 ) -> pd.DataFrame:
-    "Carica windows.csv (nuovo schema) restituendo colonne normalizzate in minuti."
+    """Carica windows.csv (schema attuale) restituendo colonne normalizzate in minuti."""
     extended_cols = WINDOW_BASE_COLS + ["window_start_min", "window_end_min", "window_minutes"]
     if not path.exists():
-        logger.warning("%s non trovato: copertura finestre disabilitata (modalita legacy)", path.name)
-        if config is not None and hasattr(config, "windows"):
-            try:
-                if getattr(config.windows, "coverage_mode", "disabled") != "disabled":
-                    config.windows.coverage_mode = "disabled"
-            except AttributeError:
-                pass
-        return pd.DataFrame(columns=extended_cols)
+        raise FileNotFoundError(f"{path.name} non trovato: il file windows.csv è obbligatorio.")
 
     df = pd.read_csv(path)
     if df.empty:
-        logger.warning("%s vuoto: nessuna finestra caricata", path.name)
-        return pd.DataFrame(columns=extended_cols)
+        raise ValueError(f"{path.name} vuoto: nessuna finestra caricata")
 
     _ensure_columns(df, WINDOW_BASE_COLS, path.name)
 
     df = df.copy()
-    df["window_id"] = df["window_id"].astype(str).str.strip()
-    df = df[df["window_id"] != ""]
-    if df.empty:
-        logger.warning("%s: tutte le finestre prive di identificativo valido sono state scartate", path.name)
-        return pd.DataFrame(columns=extended_cols)
 
+    # window_id: evita "nan" stringa e scarta vuoti/NaN
+    s = df["window_id"].astype("string").str.strip()
+    valid = s.notna() & (s != "")
+    df = df[valid].copy()
+    if df.empty:
+        raise ValueError(f"{path.name}: tutte le finestre prive di identificativo valido sono state scartate")
+    df.loc[:, "window_id"] = s[valid]
+
+    # duplicati window_id: warning e tieni l'ultima occorrenza
     if df["window_id"].duplicated().any():
         warnings.warn("windows.csv: window_id duplicati, mantengo l'ultima occorrenza", RuntimeWarning)
         df = df.drop_duplicates(subset="window_id", keep="last")
@@ -475,9 +520,11 @@ def load_windows(
     df["window_end_min"] = df["window_end"].apply(parse_hhmm_to_min)
     df["window_start"] = df["window_start_min"].apply(_minutes_to_time)
     df["window_end"] = df["window_end_min"].apply(_minutes_to_time)
-    df["role"] = df["role"].astype(str).str.strip()
-    df["window_demand"] = pd.to_numeric(df["window_demand"], errors="coerce").fillna(0).astype(int)
 
+    # role come string senza trasformare NaN in "nan"
+    df["role"] = df["role"].astype("string").str.strip()
+
+    df["window_demand"] = pd.to_numeric(df["window_demand"], errors="coerce").fillna(0).astype(int)
     if (df["window_demand"] < 0).any():
         raise ValueError(f"{path.name}: window_demand deve essere >= 0")
 
@@ -497,12 +544,13 @@ def load_windows(
         )
         extended_cols = extended_cols + ["skill_requirements"]
     else:
-        df["skill_requirements"] = [{}] * len(df)
+        # dizionari non condivisi tra le righe
+        df["skill_requirements"] = [{} for _ in range(len(df))]
         extended_cols = extended_cols + ["skill_requirements"]
 
     if shifts is not None and not shifts.empty:
         known_roles = set(shifts["role"].astype(str).str.strip())
-        unknown_roles = sorted(set(df["role"]) - known_roles)
+        unknown_roles = sorted(set(df["role"].astype(str).str.strip()) - known_roles)
         if unknown_roles:
             raise ValueError(f"{path.name}: ruoli sconosciuti {unknown_roles}")
 
@@ -524,16 +572,19 @@ def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
     _ensure_columns(df, required, path.name)
 
     df = df.copy()
-    df["employee_id"] = df["employee_id"].astype(str)
-    df["day"] = df["day"].astype(str)
+    df["employee_id"] = df["employee_id"].astype("string").str.strip()
+    df["day"] = df["day"].astype("string").str.strip()
+    df["reason"] = df.get("reason", "").fillna("").astype("string").str.strip()
 
-    if "reason" not in df.columns:
-        df["reason"] = ""
 
     def _parse_optional_time(value):
-        if pd.isna(value) or str(value).strip() == "":
+        if pd.isna(value):
             return None
-        return _parse_time_hhmm(str(value))
+        s = str(value).strip()
+        if s == "":
+            return None
+        return _parse_time_hhmm(value)  # passa il valore “com’è”
+
 
     records = []
     for _, row in df.iterrows():
@@ -562,7 +613,7 @@ def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
                 "employee_id": row["employee_id"],
                 "off_start_dt": off_start_dt,
                 "off_end_dt": off_end_dt,
-                "reason": str(row.get("reason", "")),
+                "reason": row["reason"],
             }
         )
 
@@ -571,7 +622,8 @@ def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
 
     result = pd.DataFrame(records, columns=columns)
 
-    valid_employees = set(employees["employee_id"].astype(str))
+    valid_employees = set(employees["employee_id"].astype("string").str.strip())
+    result["employee_id"] = result["employee_id"].astype("string").str.strip()
     mask_valid = result["employee_id"].isin(valid_employees)
     if not mask_valid.all():
         invalid_count = (~mask_valid).sum()
@@ -584,7 +636,7 @@ def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
     if result.empty:
         return pd.DataFrame(columns=columns)
 
-    result = result.drop_duplicates().reset_index(drop=True)
+    result = result.drop_duplicates(subset=["employee_id", "off_start_dt", "off_end_dt"], keep="last")
     return result
 
 
@@ -665,60 +717,87 @@ def merge_availability(quali_mask: pd.DataFrame, availability: pd.DataFrame) -> 
 
 
 
-def load_data_bundle(data_dir: Path, *, config: object | None = None, shifts_only_mode: bool = False) -> SimpleNamespace:
-    """Carica i dataset con la nuova architettura (v2.0+)."""
+from types import SimpleNamespace
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+def load_data_bundle(data_dir: Path, *, config: object | None = None) -> SimpleNamespace:
+    """Carica tutti i dataset (v2.0+), inclusi windows.csv (obbligatorio)."""
     data_dir = Path(data_dir)
 
-    # windows.csv is required unless in shifts-only mode
+    # windows.csv è obbligatorio
     windows_path = data_dir / "windows.csv"
-    if not windows_path.exists() and not shifts_only_mode:
+    if not windows_path.exists():
         raise FileNotFoundError(
             f"windows.csv is required in {data_dir}. "
-            f"Use shifts_only_mode=True if you only need shift-based scheduling without window coverage."
+            f"If you need a shifts-only mode, remove this check or provide a stub windows.csv."
         )
 
-    employees = load_employees(data_dir / "employees.csv")
-    shifts = load_shifts(data_dir / "shifts.csv")
+    # --- Caricamento dataset base ---
+    employees    = load_employees(data_dir / "employees.csv")
+    shifts       = load_shifts(data_dir / "shifts.csv")
     availability = load_availability(data_dir / "availability.csv", employees, shifts)
 
-    quali_mask = build_quali_mask(employees, shifts)
-    assign_mask = merge_availability(quali_mask, availability)
+    quali_mask   = build_quali_mask(employees, shifts)
+    assign_mask  = merge_availability(quali_mask, availability)
 
-    time_off = load_time_off(data_dir / "time_off.csv", employees)
-    preferences = load_preferences(data_dir / "preferences.csv", employees, shifts)
-    windows_df = load_windows(data_dir / "windows.csv", shifts, config=config)
+    time_off     = load_time_off(data_dir / "time_off.csv", employees)
+    preferences  = load_preferences(data_dir / "preferences.csv", employees, shifts)
+    # load_windows signature: (path, shifts)
+    windows_df   = load_windows(windows_path, shifts)
 
+    # --- Utilità per cast sicuri ---
+    def _to_int_safe(x, default=0):
+        try:
+            if pd.isna(x):
+                return default
+            return int(x)
+        except Exception:
+            return default
+
+    # --- Dizionari dai turni ---
     shift_duration_minutes = {
-        str(row.shift_id): int(row.duration_minutes)
+        str(row.shift_id): _to_int_safe(getattr(row, "duration_minutes", 0), 0)
         for row in shifts.itertuples()
     }
+
     shift_records = {
         str(row.shift_id): {
-            "day": row.day,
-            "role": row.role,
-            "start_min": int(row.start_min),
-            "end_min": int(row.end_min),
-            "crosses_midnight": bool(row.crosses_midnight),
-            "demand": int(row.demand),
-            "required_staff": int(row.required_staff),
-            "skill_req": dict(row.skill_requirements) if isinstance(row.skill_requirements, dict) else {},
+            "day": getattr(row, "day", None),
+            "role": getattr(row, "role", None),
+            "start_min": _to_int_safe(getattr(row, "start_min", None)),
+            "end_min": _to_int_safe(getattr(row, "end_min", None)),
+            "crosses_midnight": bool(getattr(row, "crosses_midnight", False)),
+            # Campi opzionali in shifts (fallback a 0/{} se assenti o NaN)
+            "demand": _to_int_safe(getattr(row, "demand", 0), 0),
+            "required_staff": _to_int_safe(getattr(row, "required_staff", 0), 0),
+            "skill_req": (
+                dict(getattr(row, "skill_requirements", {}))
+                if isinstance(getattr(row, "skill_requirements", {}), dict) else {}
+            ),
         }
         for row in shifts.itertuples()
     }
 
+    # --- Dizionari dalle windows ---
     window_records = {
         str(row.window_id): {
-            "day": row.day,
-            "role": row.role,
-            "start_min": int(row.window_start_min),
-            "end_min": int(row.window_end_min),
-            "window_minutes": int(row.window_minutes),
-            "window_demand": int(row.window_demand),
-            "skill_req": dict(row.skill_requirements) if hasattr(row, 'skill_requirements') and isinstance(row.skill_requirements, dict) else {},
+            "day": getattr(row, "day", None),
+            "role": getattr(row, "role", None),
+            "start_min": _to_int_safe(getattr(row, "window_start_min", None)),
+            "end_min": _to_int_safe(getattr(row, "window_end_min", None)),
+            "window_minutes": _to_int_safe(getattr(row, "window_minutes", None)),
+            "window_demand": _to_int_safe(getattr(row, "window_demand", 0), 0),
+            "skill_req": (
+                dict(getattr(row, "skill_requirements", {}))
+                if isinstance(getattr(row, "skill_requirements", {}), dict) else {}
+            ),
         }
         for row in windows_df.itertuples()
     }
 
+    # --- Skills dipendenti e mask di eleggibilità ---
     emp_skills = {
         str(row.employee_id): set(row.skills_set)
         for row in employees.itertuples()
@@ -728,7 +807,8 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None, shifts_onl
         for row in assign_mask.itertuples()
     }
 
-    bundle = SimpleNamespace(
+    # --- Bundle finale ---
+    return SimpleNamespace(
         employees_df=employees,
         shifts_df=shifts,
         availability_df=availability,
@@ -743,14 +823,13 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None, shifts_onl
         emp_skills=emp_skills,
         eligible=eligible,
     )
-    return bundle
 
 
 def summarize(employees: pd.DataFrame, shifts: pd.DataFrame, av_mask: pd.DataFrame):
     n_emp = len(employees)
     n_shifts = len(shifts)
-    n_assignable = av_mask["can_assign"].sum()
     n_pairs = len(av_mask)
+    n_assignable = int(pd.to_numeric(av_mask.get("can_assign", 0), errors="coerce").fillna(0).sum())
 
     days = sorted(shifts["day"].unique())
     roles = sorted(shifts["role"].unique())
@@ -758,11 +837,19 @@ def summarize(employees: pd.DataFrame, shifts: pd.DataFrame, av_mask: pd.DataFra
     print("=== Riepilogo dati ===")
     print(f"Dipendenti: {n_emp}")
     print(f"Turni: {n_shifts} ({len(days)} giorni, ruoli: {roles})")
-    print(f"Coppie possibili employeeÃƒâ€”shift: {n_pairs}")
-    print(f"Coppie assegnabili (qualifica & disponibilitÃƒÂ ): {n_assignable} ({n_assignable/n_pairs:.1%})")
+    print(f"Coppie possibili employee×shift: {n_pairs}")
+    if n_pairs > 0:
+        print(f"Coppie assegnabili (qualifica & disponibilità): {n_assignable} ({n_assignable/n_pairs:.1%})")
+    else:
+        print("Coppie assegnabili (qualifica & disponibilità): 0 (n/a)")
     print()
+
+    blocked = av_mask[av_mask.get("can_assign", 0) == 0]
     print("Esempi di blocchi non assegnabili (prime 10):")
-    print(av_mask[av_mask["can_assign"] == 0].head(10).to_string(index=False))
+    if blocked.empty:
+        print("(nessuno)")
+    else:
+        print(blocked.head(10).to_string(index=False))
 
 
 def main(argv=None):
