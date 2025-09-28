@@ -1,7 +1,0 @@
-window_id,day,window_start,window_end,role,window_demand,skills
-WIN_NURSE_DAY_1,2025-09-29,08:00,16:00,nurse,2,"first_aid:1,cpr:2"
-WIN_NURSE_EVE_1,2025-09-29,16:00,23:59,nurse,1,first_aid:1
-WIN_DOC_DAY_1,2025-09-29,08:00,20:00,doctor,1,"surgery:1,emergency:1"
-WIN_NURSE_DAY_2,2025-09-30,08:00,16:00,nurse,2,"first_aid:1,cpr:1"
-WIN_NURSE_EVE_2,2025-09-30,16:00,23:59,nurse,1,
-WIN_DOC_DAY_2,2025-09-30,08:00,20:00,doctor,1,emergency:1

@@ -172,9 +172,13 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
         # Caso 3: contracted_hours vuota e min_week_hours != max_week_hours (o min_week_hours mancante)
         # → Lavoratore non contrattualizzato, lascia contracted_hours come NaN
     
-    # Assicura che contracted_hours sia float (con NaN per valori mancanti)
-    df["contracted_hours"] = df["contracted_hours"].astype("float64")
-    df["min_week_hours"] = df["min_week_hours"].astype("float64")
+    for column in ("contracted_hours", "min_week_hours", "max_week_hours"):
+        df[column] = _coerce_integer_series(
+            df[column],
+            column=column,
+            origin="employees.csv",
+            ids=df.get("employee_id"),
+        )
     
     # Log statistiche finali
     contracted_count = df["contracted_hours"].notna().sum()
@@ -190,6 +194,33 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
 
 
 
+def _coerce_integer_series(
+    series: pd.Series,
+    *,
+    column: str,
+    origin: str,
+    ids: pd.Series | None = None,
+) -> pd.Series:
+    """Converte colonne numeriche in Int64 segnalando e arrotondando i valori non interi."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    rounded = numeric.round()
+    decimals_mask = numeric.notna() & (rounded != numeric)
+    if decimals_mask.any():
+        sample_preview = ""
+        if ids is not None:
+            offenders = ids.loc[decimals_mask].astype(str)
+            sample = offenders.head(5).tolist()
+            suffix = ", ..." if len(offenders) > len(sample) else ""
+            if sample:
+                sample_str = ", ".join(sample)
+                sample_preview = f" (employee_id: {sample_str}{suffix})"
+        warnings.warn(
+            f'{origin}: valori non interi trovati in "{column}"{sample_preview}; arrotondo al piu vicino intero.',
+            RuntimeWarning,
+        )
+    return rounded.astype("Int64")
+
+
 def load_employees(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     _ensure_columns(df, REQUIRED_EMP_COLS, "employees.csv")
@@ -198,9 +229,14 @@ def load_employees(path: Path) -> pd.DataFrame:
     df["employee_id"] = df["employee_id"].astype(str)
     df["name"] = df["name"].astype(str)
     df["roles"] = df["roles"].astype(str)
-    df["max_week_hours"] = pd.to_numeric(df["max_week_hours"], errors="raise").astype(int)
-    df["min_rest_hours"] = pd.to_numeric(df["min_rest_hours"], errors="raise").astype(int)
-    df["max_overtime_hours"] = pd.to_numeric(df["max_overtime_hours"], errors="raise").astype(int)
+    numeric_columns = ["max_week_hours", "min_rest_hours", "max_overtime_hours"]
+    for col in numeric_columns:
+        df[col] = _coerce_integer_series(
+            df[col],
+            column=col,
+            origin="employees.csv",
+            ids=df["employee_id"],
+        )
 
     # unicità  id
     if df["employee_id"].duplicated().any():
