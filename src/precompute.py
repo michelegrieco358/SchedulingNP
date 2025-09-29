@@ -25,11 +25,11 @@ class AdaptiveSlotData:
     segment_bounds: Dict[str, tuple[date, str, int, int]]
     cover_segment: Dict[tuple[str, str], int]
 
-# --- 1) Normalizza start/end in datetime coerenti (gestisce end a mezzanotte o passaggi giorno) ---
+
 def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
-    """
+    """Normalizza start/end in datetime coerenti (gestisce end a mezzanotte o passaggi giorno)
     Aggiunge colonne:
-      - start_dt, end_dt: datetime (naive) calcolati da day+start/end
+      - start_dt, end_dt: datetime calcolati da day+start/end
       - duration_h: durata in ore (float)
     Regola: se end <= start, l'end si intende al giorno successivo (turno che "attraversa" le 24:00).
     """
@@ -50,7 +50,7 @@ def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
             if e.time() == time(0, 0):
                 end_dt.append(e + timedelta(days=1))
             else:
-                raise ValueError("Fine turno non puÃƒÆ’Ã‚Â² coincidere con l'inizio a meno che non sia mezzanotte.")
+                raise ValueError("Fine turno non può coincidere con l'inizio a meno che non sia mezzanotte.")
         else:
             end_dt.append(e)
 
@@ -116,8 +116,10 @@ def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample:
         DataFrame con le colonne principali dei turni normalizzati
     """
     print("=== Shifts normalizzati ===")
-    cols = ["shift_id", "day", "start_dt", "end_dt", "duration_h", "role", "required_staff"]
+    base = ["shift_id", "day", "start_dt", "end_dt", "duration_h", "role"]
+    cols = base + (["required_staff"] if "required_staff" in shifts_norm.columns else [])
     summary_df = shifts_norm[cols].copy()
+
     print(summary_df.to_string(index=False, max_colwidth=24))
     print()
     print("=== Esempi di gap (prime righe) ===")
@@ -190,6 +192,14 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
     slot_minutes: Dict[str, int] = {}
     slot_bounds: Dict[str, tuple[int, int]] = {}
     cover_segment: Dict[tuple[str, str], int] = {}
+    windows_by_key: dict[tuple[date, str], list[tuple[int, int]]] = {}
+
+    if windows_df is not None and not windows_df.empty:
+        for row in windows_df.itertuples():
+            key = (row.day, row.role)
+            windows_by_key.setdefault(key, []).append(
+                (int(row.window_start_min), int(row.window_end_min))
+            )
 
     for key in sorted(segments_by_day_role.keys()):
         seg_ids = segments_by_day_role[key]
@@ -201,15 +211,9 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             breakpoints.extend([start, end])
         
         # CORREZIONE CRITICA: Aggiungi breakpoints dalle finestre (windows)
-        if windows_df is not None and not windows_df.empty:
-            day, role = key
-            windows_for_key = windows_df[
-                (windows_df["day"] == day) & (windows_df["role"] == role)
-            ]
-            for _, window_row in windows_for_key.iterrows():
-                window_start = int(window_row["window_start_min"])
-                window_end = int(window_row["window_end_min"])
-                breakpoints.extend([window_start, window_end])
+        for window_start, window_end in windows_by_key.get(key, []):
+            breakpoints.extend([window_start, window_end])
+
         
         breakpoints = sorted(set(breakpoints))
 

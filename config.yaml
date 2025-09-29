@@ -35,3 +35,7 @@ solver:
   mip_gap: null
 logging:
   level: INFO
+windows:
+  midnight_policy: split
+  warn_slots_threshold: 500
+  hard_slots_threshold: 2000
