@@ -1,0 +1,136 @@
+--- a/src/reporting.py
++++ b/src/reporting.py
+@@
+-                try:
+-                    start_min, end_min = self.solver.adaptive_slot_data.segment_bounds[segment_id]
+-                    start_time = f"{start_min // 60:02d}:{start_min % 60:02d}"
+-                    end_time = f"{end_min // 60:02d}:{end_min % 60:02d}"
+-                except (AttributeError, KeyError):
++                try:
++                    bounds = self.solver.adaptive_slot_data.segment_bounds[segment_id]
++                    if isinstance(bounds, (tuple, list)) and len(bounds) >= 2:
++                        start_min = int(bounds[-2])
++                        end_min = int(bounds[-1])
++                        start_time = f"{start_min // 60:02d}:{start_min % 60:02d}"
++                        end_time = f"{end_min // 60:02d}:{end_min % 60:02d}"
++                    else:
++                        raise KeyError(segment_id)
++                except (AttributeError, KeyError, ValueError, TypeError):
+                     start_time = "??:??"
+                     end_time = "??:??"
+@@
+-    def _print_coverage_summary(self, coverage_df: pd.DataFrame) -> None:
+-        """Stampa un sommario compatto della copertura su console."""
+-        if coverage_df.empty:
+-            print("\nNessun dato di copertura disponibile")
+-            return
+-
+-        print("\n=== Copertura Segmenti ===")
+-        
+-        # Calcola statistiche globali
+-        total_segments = len(coverage_df)
+-        covered = len(coverage_df[coverage_df["shortfall"] == 0])
+-        partial = len(coverage_df[(coverage_df["shortfall"] > 0) & (coverage_df["assigned"] > 0)])
+-        uncovered = len(coverage_df[coverage_df["assigned"] == 0])
+-        
+-        # Stampa intestazione con statistiche globali
+-        print(f"{'Intervallo':<15} {'Stato':^6} {'Rich':>5} {'Ass':>5} {'Delta':>6} | {'Copertura':<20}")
+-        print("-" * 60)
+-        
+-        # Stampa dettagli per ogni segmento con barra di copertura
+-        for _, row in coverage_df.iterrows():
+-            if row["demand"] == 0:
+-                coverage_pct = 100
+-            else:
+-                coverage_pct = (row["assigned"] / row["demand"]) * 100
+-            
+-            # Calcola barra di copertura
+-            bar_width = 20
+-            filled = int((coverage_pct / 100) * bar_width)
+-            if coverage_pct == 100:
+-                bar = "?-^" * filled
+-                status = "?o""
+-            elif coverage_pct == 0:
+-                bar = "?-'" * bar_width
+-                status = "?o-"
+-            else:
+-                bar = "?-^" * filled + "?-'" * (bar_width - filled)
+-                status = "~"
+-            
+-            print(f"{row['start_time']}-{row['end_time']:<6} "
+-                  f"[{status:^4}] "
+-                  f"{row['demand']:4d} "
+-                  f"{row['assigned']:4d} "
+-                  f"{row['overstaffing'] - row['shortfall']:+5d} | "
+-                  f"{bar}")
+-        
+-        # Stampa sommario finale
+-        print("-" * 60)
+-        print(f"Totale segmenti: {total_segments:3d}  "
+-              f"Coperti: {covered:3d} ?o"  "
+-              f"Parziali: {partial:3d} ~  "
+-              f"Scoperti: {uncovered:3d} ?o-")
+-        
+-        # Genera e salva plot se ci sono dati
+-        if not coverage_df.empty:
+-            self._plot_coverage(coverage_df)
++    def _print_coverage_summary(self, coverage_df: pd.DataFrame) -> None:
++        """Stampa un sommario compatto della copertura su console."""
++        if coverage_df.empty:
++            print("\nNessun dato di copertura disponibile")
++            return
++
++        print("\n=== Copertura Segmenti ===")
++
++        total_segments = len(coverage_df)
++        covered = len(coverage_df[coverage_df["shortfall"] == 0])
++        partial = len(coverage_df[(coverage_df["shortfall"] > 0) & (coverage_df["assigned"] > 0)])
++        uncovered = len(coverage_df[coverage_df["assigned"] == 0])
++
++        header = f"{'Intervallo':<17} {'Stato':<6} {'Rich':>5} {'Ass':>5} {'Delta':>6} | {'Copertura':<20}"
++        print(header)
++        print("-" * len(header))
++
++        bar_width = 20
++        for _, row in coverage_df.iterrows():
++            demand = int(row["demand"])
++            assigned = int(row["assigned"])
++            shortfall = int(row["shortfall"])
++            overstaff = int(row["overstaffing"])
++
++            if demand <= 0:
++                coverage_pct = 100.0
++            else:
++                coverage_pct = max(0.0, min(100.0, (assigned / demand) * 100.0))
++
++            filled = int(round((coverage_pct / 100.0) * bar_width))
++            filled = min(bar_width, max(0, filled))
++            bar = "#" * filled + "." * (bar_width - filled)
++
++            if coverage_pct >= 99.5:
++                status = "OK"
++            elif coverage_pct <= 0.5:
++                status = "MISS"
++            else:
++                status = "PART"
++
++            delta = overstaff - shortfall
++            print(
++                f"{row['start_time']}-{row['end_time']:<7} "
++                f"{status:<6} "
++                f"{demand:5d} "
++                f"{assigned:5d} "
++                f"{delta:+6d} | "
++                f"{bar}"
++            )
++
++        print("-" * len(header))
++        print(
++            f"Total segments: {total_segments:3d}  "
++            f"Covered: {covered:3d} OK  "
++            f"Partial: {partial:3d} PART  "
++            f"Uncovered: {uncovered:3d} MISS"
++        )
++
++        if not coverage_df.empty:
++            self._plot_coverage(coverage_df)
