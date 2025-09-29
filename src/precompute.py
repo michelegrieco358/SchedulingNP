@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from types import SimpleNamespace
 
-from dateutil import tz
 from dateutil import parser as dtparser
 import pandas as pd
 
@@ -430,6 +429,15 @@ def map_windows_to_slots(
                 signature = slot_signature.get(slot_id, frozenset())
                 if not signature:
                     slot_start, slot_end = data.slot_bounds[slot_id]
+                    logger.warning(
+                        "Slot %s (%s-%s) non è coperto da alcun segmento (day=%s role=%s); richiesta finestra %s",
+                        slot_id,
+                        slot_start,
+                        slot_end,
+                        row.day,
+                        row.role,
+                        window_id,
+                    )
                     raise RuntimeError(
                         "Finestra %s: slot %s (%s-%s) senza copertura potenziale per day=%s role=%s"
                         % (
@@ -452,3 +460,4 @@ def map_windows_to_slots(
         total_refs,
     )
     return data, slots_in_window, slot_signature
+
