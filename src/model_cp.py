@@ -116,6 +116,7 @@ class ShiftSchedulingCpSolver:
         preferences: pd.DataFrame | None = None,
         emp_skills: Mapping[str, set[str]] | None = None,
         shift_skill_requirements: Mapping[str, Mapping[str, int]] | None = None,
+        window_skill_requirements: Mapping[str, Mapping[str, int]] | None = None,
         window_demands: Mapping[str, int] | None = None,
         window_shifts: Mapping[str, Sequence[str]] | None = None,
         window_duration_minutes: Mapping[str, int] | None = None,
@@ -1799,6 +1800,7 @@ class ShiftSchedulingCpSolver:
 def _load_data(
     data_dir: Path,
     global_min_rest_hours: float,
+    cfg: config_loader.Config,
 ) -> tuple[
     pd.DataFrame,  # employees
     pd.DataFrame,  # shifts
@@ -1813,6 +1815,8 @@ def _load_data(
     dict[str, list[str]],  # window_shifts
     dict[str, int],  # window_duration_map
     dict[str, int],  # shift_soft_demand
+    dict[str, dict[str, int]],  # window_skill_requirements
+    precompute.AdaptiveSlotData | None,  # adaptive_slot_data
 ]:
     employees = loader.load_employees(data_dir / "employees.csv")
     shifts = loader.load_shifts(data_dir / "shifts.csv")
@@ -1852,6 +1856,35 @@ def _load_data(
             str(row["window_id"]): int(row["window_minutes"]) 
             for _, row in windows_df.iterrows()
         }
+
+    window_skill_req: dict[str, dict[str, int]] = {}
+    if not windows_df.empty and "skill_requirements" in windows_df.columns:
+        for _, row in windows_df.iterrows():
+            requirements = row.get("skill_requirements")
+            if not isinstance(requirements, dict):
+                continue
+            cleaned: dict[str, int] = {}
+            for skill_name, qty in requirements.items():
+                try:
+                    qty_int = int(qty)
+                except (TypeError, ValueError):
+                    continue
+                if qty_int > 0:
+                    cleaned[str(skill_name)] = qty_int
+            if cleaned:
+                window_skill_req[str(row["window_id"])] = cleaned
+
+    adaptive_data: precompute.AdaptiveSlotData | None = None
+    if not windows_df.empty:
+        try:
+            adaptive_data = precompute.build_adaptive_slots(shifts_norm, cfg, windows_df)
+            adaptive_data, _, _ = precompute.map_windows_to_slots(adaptive_data, windows_df, merge_signatures=True)
+        except Exception as exc:  # pragma: no cover - diagnostica
+            warnings.warn(
+                f"Impossibile costruire gli slot adattivi: {exc}",
+                RuntimeWarning,
+            )
+            adaptive_data = None
 
     emp_skills = {
         str(row["employee_id"]): set(row.get("skills_set", set()))
@@ -1911,6 +1944,8 @@ def _load_data(
         window_shifts,
         window_duration_map,
         shift_soft_demand,
+        window_skill_req,
+        adaptive_data,
     )
 
 
@@ -2004,7 +2039,9 @@ def main(argv: list[str] | None = None) -> int:
         window_shifts,
         window_duration_map,
         shift_soft_demand,
-    ) = _load_data(args.data_dir, solver_cfg.global_min_rest_hours)
+        window_skill_req,
+        adaptive_data,
+    ) = _load_data(args.data_dir, solver_cfg.global_min_rest_hours, cfg)
 
     skill_emp_with_tags = sum(1 for skills in emp_skills.values() if skills)
     skill_shift_with_req = sum(1 for req in shift_skill_req.values() if req)
@@ -2041,12 +2078,14 @@ def main(argv: list[str] | None = None) -> int:
         preferences=preferences,
         emp_skills=emp_skills,
         shift_skill_requirements=shift_skill_req,
+        window_skill_requirements=window_skill_req,
         window_demands=window_demand_map,
         window_shifts=window_shifts,
         window_duration_minutes=window_duration_map,
         config=solver_cfg,
         objective_priority=objective_priority,
         objective_weights=objective_weights,
+        adaptive_slot_data=adaptive_data,
     )
     
     # Imposta demand_mode dal config

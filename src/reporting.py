@@ -267,7 +267,6 @@ class ScheduleReporter:
             self._plot_coverage(coverage_df)
 
     def _plot_coverage(self, coverage_df: pd.DataFrame) -> None:
-    def _plot_coverage(self, coverage_df: pd.DataFrame) -> None:
         """Genera un grafico della domanda e copertura per intervallo temporale."""
         try:
             import matplotlib.pyplot as plt
