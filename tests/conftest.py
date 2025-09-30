@@ -1,129 +1,173 @@
-"""Configurazione pytest per la suite di test sintetici."""
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterable
+
 import pytest
-import time
-from typing import Dict, List
+
+from src import config_loader, loader, model_cp
 
 
-# Collezione per tracciare i tempi di esecuzione dei test
-test_times: Dict[str, float] = {}
+_EMPLOYEES_HEADER = [
+    "employee_id",
+    "name",
+    "roles",
+    "max_week_hours",
+    "min_rest_hours",
+    "max_overtime_hours",
+    "contracted_hours",
+    "min_week_hours",
+    "skills",
+]
 
 
-def pytest_configure(config):
-    """Configurazione pytest."""
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running (excluded by default)"
+def _write_csv(path: Path, rows: Iterable[Iterable[str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        for row in rows:
+            writer.writerow(row)
+
+
+@pytest.fixture()
+def sample_data_dir(tmp_path: Path) -> Path:
+    data_dir = tmp_path / "data"
+
+    _write_csv(
+        data_dir / "employees.csv",
+        [
+            _EMPLOYEES_HEADER,
+            ["E1", "Alice", "Nurse", "40", "11", "5", "", "0", "skillA"],
+        ],
     )
 
+    _write_csv(
+        data_dir / "shifts.csv",
+        [
+            ["shift_id", "day", "start", "end", "role", "required_staff", "demand_id"],
+            ["S1", "2024-01-01", "08:00", "16:00", "Nurse", "1", "W1"],
+        ],
+    )
 
-def pytest_collection_modifyitems(config, items):
-    """Modifica la collezione di test per aggiungere marker automatici."""
-    for item in items:
-        # Aggiungi marker slow per test che potrebbero essere lenti
-        if any(keyword in item.name.lower() for keyword in [
-            "performance", "many_slots", "parametrized", "complex", "tradeoff"
-        ]):
-            item.add_marker(pytest.mark.slow)
+    _write_csv(
+        data_dir / "availability.csv",
+        [
+            ["employee_id", "shift_id", "is_available"],
+            ["E1", "S1", "1"],
+        ],
+    )
 
+    _write_csv(
+        data_dir / "windows.csv",
+        [
+            ["window_id", "day", "window_start", "window_end", "role", "window_demand", "skills"],
+            ["W1", "2024-01-01", "08:00", "16:00", "Nurse", "1", "skillA:1"],
+        ],
+    )
 
-@pytest.fixture(autouse=True)
-def track_test_time(request):
-    """Fixture per tracciare il tempo di esecuzione dei test."""
-    start_time = time.time()
-    yield
-    end_time = time.time()
-    duration = end_time - start_time
-    test_times[request.node.nodeid] = duration
+    _write_csv(
+        data_dir / "overtime_costs.csv",
+        [
+            ["role", "overtime_cost_per_hour"],
+            ["Nurse", "20"],
+        ],
+    )
 
-
-def pytest_sessionfinish(session, exitstatus):
-    """Callback eseguito alla fine della sessione di test."""
-    if not test_times:
-        return
-    
-    total_time = sum(test_times.values())
-    slow_tests = [(name, duration) for name, duration in test_times.items() 
-                  if duration > 2.0]  # Test > 2 secondi considerati lenti
-    
-    print(f"\n=== Performance Summary ===")
-    print(f"Total test time: {total_time:.2f}s")
-    print(f"Number of tests: {len(test_times)}")
-    print(f"Average per test: {total_time/len(test_times):.2f}s")
-    
-    if slow_tests:
-        print(f"\nSlow tests (>2s):")
-        for name, duration in sorted(slow_tests, key=lambda x: x[1], reverse=True):
-            print(f"  {duration:.2f}s - {name}")
-    
-    # Budget check
-    BUDGET_SECONDS = 60  # Budget massimo per la suite
-    if total_time > BUDGET_SECONDS:
-        print(f"\n⚠️  WARNING: Test suite exceeded budget ({total_time:.1f}s > {BUDGET_SECONDS}s)")
-    else:
-        print(f"\n✅ Test suite within budget ({total_time:.1f}s <= {BUDGET_SECONDS}s)")
+    return data_dir
 
 
-@pytest.fixture
-def mock_solver_config():
-    """Fixture per configurazione solver veloce per test."""
-    from src.model_cp import SolverConfig
-    return SolverConfig(max_seconds=2.0)  # Timeout basso per test veloci
+@pytest.fixture()
+def config_obj() -> config_loader.Config:
+    return config_loader.Config()
 
 
-@pytest.fixture
-def sample_employees():
-    """Fixture per dipendenti di esempio."""
-    import pandas as pd
-    return pd.DataFrame([
-        {"employee_id": "E1", "name": "Alice", "roles": "nurse", "max_week_hours": 40,
-         "min_rest_hours": 8, "max_overtime_hours": 10, "skills": "first_aid"},
-        {"employee_id": "E2", "name": "Bob", "roles": "doctor", "max_week_hours": 40,
-         "min_rest_hours": 8, "max_overtime_hours": 10, "skills": "surgery"},
-    ])
+@pytest.fixture()
+def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) -> SimpleNamespace:
+    (
+        employees,
+        shifts_norm,
+        availability,
+        assign_mask,
+        rest_conflicts,
+        overtime_costs,
+        preferences,
+        emp_skills,
+        shift_skill_req,
+        window_demand_map,
+        window_shifts,
+        window_duration_map,
+        shift_soft_demand,
+        window_skill_req,
+        adaptive_data,
+    ) = model_cp._load_data(sample_data_dir, config_obj.rest.min_between_shifts, config_obj)
 
+    penalties = {
+        "unmet_window": config_obj.penalties.unmet_window,
+        "unmet_demand": config_obj.penalties.unmet_demand,
+        "unmet_skill": config_obj.penalties.unmet_skill,
+        "unmet_shift": config_obj.penalties.unmet_shift,
+        "overstaff": config_obj.penalties.overstaff,
+        "overtime": config_obj.penalties.overtime,
+        "preferences": config_obj.penalties.preferences,
+        "fairness": config_obj.penalties.fairness,
+    }
+    objective_priority = list(config_obj.objective.priority)
+    objective_weights = model_cp._build_objective_weights(objective_priority, penalties)
 
-@pytest.fixture
-def sample_shifts():
-    """Fixture per turni di esempio."""
-    import pandas as pd
-    return pd.DataFrame([
-        {"shift_id": "S1", "day": "2025-10-07", "start": "06:00", "end": "14:00",
-         "role": "nurse", "demand": 1, "skill_requirements": "first_aid=1"},
-        {"shift_id": "S2", "day": "2025-10-07", "start": "14:00", "end": "22:00",
-         "role": "doctor", "demand": 1, "skill_requirements": "surgery=1"},
-    ])
+    solver_cfg = model_cp.SolverConfig(
+        max_seconds=10.0,
+        log_search_progress=False,
+        global_min_rest_hours=config_obj.rest.min_between_shifts,
+        overtime_priority=objective_weights.get("overtime", 0),
+        shortfall_priority=objective_weights.get("unmet_demand", 0),
+        window_shortfall_priority=objective_weights.get("unmet_window", 0),
+        skill_shortfall_priority=objective_weights.get("unmet_skill", 0),
+        shift_shortfall_priority=objective_weights.get("unmet_shift", 0),
+        preferences_weight=objective_weights.get("preferences", 0),
+        fairness_weight=objective_weights.get("fairness", 0),
+        default_overtime_cost_weight=objective_weights.get("overtime", 0),
+        global_overtime_cap_minutes=None,
+        random_seed=config_obj.random.seed,
+        mip_gap=config_obj.solver.mip_gap,
+        skills_slack_enabled=config_obj.skills.enable_slack,
+        objective_priority=tuple(objective_priority),
+    )
 
+    solver = model_cp.ShiftSchedulingCpSolver(
+        employees=employees,
+        shifts=shifts_norm,
+        assign_mask=assign_mask,
+        rest_conflicts=rest_conflicts,
+        overtime_costs=overtime_costs,
+        preferences=preferences,
+        emp_skills=emp_skills,
+        shift_skill_requirements=shift_skill_req,
+        window_skill_requirements=window_skill_req,
+        window_demands=window_demand_map,
+        window_shifts=window_shifts,
+        window_duration_minutes=window_duration_map,
+        config=solver_cfg,
+        objective_priority=objective_priority,
+        objective_weights=objective_weights,
+        adaptive_slot_data=adaptive_data,
+    )
 
-@pytest.fixture
-def sample_assign_mask(sample_employees, sample_shifts):
-    """Fixture per maschera di assegnabilità di esempio."""
-    import pandas as pd
-    return pd.DataFrame([
-        {"employee_id": "E1", "shift_id": "S1", "can_assign": 1},
-        {"employee_id": "E2", "shift_id": "S2", "can_assign": 1},
-    ])
+    solver.demand_mode = config_obj.shifts.demand_mode
+    solver.build()
+    cp_solver = solver.solve()
 
-
-class MockAdaptiveSlotData:
-    """Classe mock per adaptive slot data nei test."""
-    
-    def __init__(self, shifts=None, slots=None):
-        self.shifts = shifts or ["S1", "S2"]
-        self.slots = slots or ["SLOT_1", "SLOT_2"]
-        
-        # Genera dati mock
-        self.segments_of_s = {shift: [f"SEG_{shift}"] for shift in self.shifts}
-        self.cover_segment = {
-            (f"SEG_{shift}", slot): 1 if shift == slot.replace("SLOT_", "S") else 0
-            for shift in self.shifts for slot in self.slots
-        }
-        self.slot_bounds = {
-            slot: (i * 60, (i + 1) * 60) for i, slot in enumerate(self.slots)
-        }
-        self.window_bounds = {}
-        self.slot_windows = {}
-
-
-@pytest.fixture
-def mock_adaptive_slot_data():
-    """Fixture per dati slot adattivi mock."""
-    return MockAdaptiveSlotData()
+    return SimpleNamespace(
+        data_dir=sample_data_dir,
+        cfg=config_obj,
+        solver_cfg=solver_cfg,
+        solver=solver,
+        cp_solver=cp_solver,
+        employees=employees,
+        shifts=shifts_norm,
+        availability=availability,
+        assign_mask=assign_mask,
+        window_skill_req=window_skill_req,
+        adaptive_data=adaptive_data,
+    )
