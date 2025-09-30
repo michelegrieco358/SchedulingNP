@@ -212,6 +212,8 @@ def test_map_windows_to_slots_merge_signatures():
         segment_owner={seg_id: "S_agg"},
         segment_bounds={seg_id: (day, "nurse", 0, 120)},
         cover_segment={(seg_id, slot_a): 1, (seg_id, slot_b): 1},
+        window_bounds={},
+        slot_windows={},
     )
 
     windows_df = pd.DataFrame(

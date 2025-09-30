@@ -44,6 +44,8 @@ def test_objective_function_differs_between_modes():
         def __init__(self):
             self.segment_bounds = {"SEG_08_12": (480, 720)}  # 08:00-12:00 (4 ore = 240 min)
             self.segments_of_s = {"S1": ["SEG_08_12"]}
+            self.window_bounds = {}
+            self.slot_windows = {}
     
     mock_data = MockData()
     

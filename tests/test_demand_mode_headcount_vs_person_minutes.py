@@ -138,6 +138,8 @@ def mock_adaptive_slot_data():
                 "S1_SHORT": ["SEG_06_08", "SEG_08_10"],  # 06:00-10:00
                 "S2_LONG": ["SEG_08_10", "SEG_10_12", "SEG_12_20"]  # 08:00-20:00
             }
+            self.window_bounds = {}
+            self.slot_windows = {}
     
     return MockSlotData()
 
@@ -254,6 +256,8 @@ def test_demand_mode_comparison():
         def __init__(self):
             self.segment_bounds = {"SEG_08_16": (480, 960)}  # 08:00-16:00
             self.segments_of_s = {"S1": ["SEG_08_16"]}
+            self.window_bounds = {}
+            self.slot_windows = {}
     
     mock_data = MockData()
     

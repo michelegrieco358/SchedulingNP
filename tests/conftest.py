@@ -119,6 +119,8 @@ class MockAdaptiveSlotData:
         self.slot_bounds = {
             slot: (i * 60, (i + 1) * 60) for i, slot in enumerate(self.slots)
         }
+        self.window_bounds = {}
+        self.slot_windows = {}
 
 
 @pytest.fixture

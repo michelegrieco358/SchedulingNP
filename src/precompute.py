@@ -23,6 +23,8 @@ class AdaptiveSlotData:
     segment_owner: Dict[str, str]
     segment_bounds: Dict[str, tuple[date, str, int, int]]
     cover_segment: Dict[tuple[str, str], int]
+    window_bounds: Dict[str, tuple[date, str, int, int]]
+    slot_windows: Dict[str, list[tuple[str, int]]]
 
 
 def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
@@ -135,7 +137,7 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
         shifts_df = data
 
     if shifts_df is None or shifts_df.empty:
-        return AdaptiveSlotData({}, {}, {}, {}, {}, {}, {})
+        return AdaptiveSlotData({}, {}, {}, {}, {}, {}, {}, {}, {})
 
     windows_cfg = getattr(config, "windows", None)
     if windows_cfg is None:
@@ -192,13 +194,18 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
     slot_bounds: Dict[str, tuple[int, int]] = {}
     cover_segment: Dict[tuple[str, str], int] = {}
     windows_by_key: dict[tuple[date, str], list[tuple[int, int]]] = {}
+    window_bounds: dict[str, tuple[date, str, int, int]] = {}
 
     if windows_df is not None and not windows_df.empty:
         for row in windows_df.itertuples():
             key = (row.day, row.role)
-            windows_by_key.setdefault(key, []).append(
-                (int(row.window_start_min), int(row.window_end_min))
-            )
+            start_min = int(row.window_start_min)
+            end_min = int(row.window_end_min)
+            windows_by_key.setdefault(key, []).append((start_min, end_min))
+            role = getattr(row, "role", None)
+            if end_min <= start_min:
+                end_min += 1440
+            window_bounds[str(row.window_id)] = (row.day, role, start_min, end_min)
 
     for key in sorted(segments_by_day_role.keys()):
         seg_ids = segments_by_day_role[key]
@@ -259,6 +266,8 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
         segment_owner=segment_owner,
         segment_bounds=segment_bounds,
         cover_segment=cover_segment,
+        window_bounds=window_bounds,
+        slot_windows={},
     )
 
 
@@ -368,6 +377,8 @@ def _merge_slots_by_signature(
         segment_owner=data.segment_owner,
         segment_bounds=data.segment_bounds,
         cover_segment=new_cover_segment,
+        window_bounds=data.window_bounds,
+        slot_windows={},
     )
     return merged_data, slot_signature
 
@@ -395,9 +406,11 @@ def map_windows_to_slots(
 
     if windows_df is None or windows_df.empty:
         logger.info("Nessuna finestra da mappare (0)")
+        data.slot_windows = {slot_id: [] for slot_id in data.slot_bounds.keys()}
         return data, {}, slot_signature
 
     slots_in_window: Dict[str, List[str]] = {}
+    slot_windows: Dict[str, list[tuple[str, int]]] = {slot_id: [] for slot_id in data.slot_bounds.keys()}
     total_refs = 0
 
     for row in windows_df.itertuples():
@@ -451,6 +464,13 @@ def map_windows_to_slots(
                     )
 
         slots_in_window[window_id] = selected
+        for slot_id in selected:
+            slot_start, slot_end = data.slot_bounds[slot_id]
+            inter_start = max(slot_start, window_start)
+            inter_end = min(slot_end, window_end)
+            duration = max(0, inter_end - inter_start)
+            if duration > 0:
+                slot_windows[slot_id].append((window_id, duration))
         total_refs += len(selected)
 
     logger.info(
@@ -459,5 +479,6 @@ def map_windows_to_slots(
         len(data.slot_bounds),
         total_refs,
     )
+    data.slot_windows = slot_windows
     return data, slots_in_window, slot_signature
 
