@@ -141,15 +141,14 @@ solver:
 - **Finestre = domanda & competenze**: quante persone e quali skill servono in ogni momento.
 - **Multi-skill**: una stessa persona può coprire più requisiti skill nella stessa finestra.
 - **Contratti interni hard**: minimo ore obbligatorio; malattia e ferie contano come ore lavorate.
-- **Overstaffing**: ammesso e inevitabile; penalizzato per ridurre l’eccesso superfluo.
+- **Overstaffing**: ammesso se inevitabile; penalizzato per ridurre l’eccesso superfluo.
 
 ---
 
 
 
-## TO-DO:TO DO: 
-- aggiungere reporting per windows skills
-- implementare lexicografica pura perchè i pesi con ordini di grandezza troppo diversi possono rallentare il solver
-- decidere come utilizzare time-off in modo più realistico
-- passare a logica multi-periodo / rolling-horizon
+## TO-DO: 
+- implementare lexicografica pura perchè i pesi con ordini di grandezza troppo diversi possono rallentare il solver.
+- decidere come utilizzare time-off in modo più realistico.
+- passare a logica multi-periodo / rolling-horizon.
 
