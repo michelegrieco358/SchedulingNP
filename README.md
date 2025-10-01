@@ -12,7 +12,7 @@ Caratteristiche principali:
 - considera la fairness (workload balance): l'assegnazione di ore deve essere il piu omogenea possibile tra i dipendenti, in modo tale che gli straordinari, se previsti, non vengano concentrati su poche persone
 - **la funzione obiettivo rispecchia una logica lessicografica, implementata con l'uso di pesi diversi.**
 Significa che le penalità da minimizzare nella funzione obiettivo sono ordinate per priorità e ogni priorità viene espressa da un peso numerico di un ordine di grandezza maggiore del successivo.
-In questo modo il risolutore CP-SAT minimizza prima i minuti non coperti (domanda), poi le skill non coperte, poi la quantità di straordinari, l'overstaffing, le preferenze espresse dai dipendenti e infine la fairness, rispettando l’ordine di importanza desiderato. L'ordine di importanza e i pesi possono essere modificati nel file di configurazione in base alle esigenze. In questo modo si può anche passare da una lessicografica a una classica funzione obiettivo con pesi.
+In questo modo il risolutore CP-SAT minimizza prima i minuti non coperti (domanda), poi le skill non coperte, poi la quantità di straordinari, l'overstaffing, le preferenze espresse dai dipendenti e infine la fairness, rispettando l’ordine di importanza desiderato. L'ordine di importanza e i pesi possono essere modificati nel file di configurazione in base alle esigenze. Scegliendo opportunamente i pesi si può anche passare da una lessicografica a una classica funzione obiettivo con pesi.
 ---
 
 ## INPUT 
@@ -42,7 +42,7 @@ shift_id,day,start,end,role
 ```
 Ogni turno ha un ID, una data, un orario di inizio e di fine, è riferito a un ruolo. 
 Opzionale: Può essere indicata la domanda di personale per ruolo (REQUIRED_STAFF) e di skill. 
-Sia le richieste di personale che quelle di skill possono essere definite sulle finestre temporali (windows) e non sui turni. 
+Sia le richieste di personale che quelle di skill possono essere definite sulle finestre temporali (windows) e/o sui turni. 
 Se sono presenti sia per turni che per finestre il programma usa di default quelle indicate in windows.
 
 ### `windows.csv`
@@ -81,18 +81,29 @@ Ogni preferenza appartiene al range [-2, 2 ] in base a una scala di gradimento (
 
 2. **Precompute**  
    - Costruisce segmenti(slot) in base ai punti di discontinuità di turni e finestre. In questo modo ogni slot è contenuto o non contenuto in una finestra temporale (non c'è copertura parziale)
-   - Genera vincoli di riposo tra turni.
+   - Controlla turni incompatibili per vincoli di riposo non rispettati.
 
 3. **Modello CP-SAT**  
-   - Variabili: `x[e,s]` (assegnazione dipendente-turno), straordinari, slack di copertura/skill.
-   - Vincoli hard: Turni indivisibili, no sovrapposizioni, rispetto riposi e vincoli contrattuali (per esempio massimo ore di strordinario).
-   - Funzione obiettivo (ordine decrescente di peso):
-     1. minuti non coperti (domanda),
-     2. minuti senza skill,
-     3. minuti di straordinario,
-     4. minuti di overstaffing (peso basso, senza buffer),
-     5. preferenze,
-     6. fairness (equilibrio del carico).
+   - Variabili di assegnazione: `x[e,s]` (assegnazione dipendente-turno) binarie. Constraints lineari.
+
+**Vincoli hard**: 
+
+- Ogni dipendente può essere assegnato al massimo a un turno per giorno:
+- Notti consecutive e limite notti settimanali: vietato assegnare notti consecutive allo stesso dipendente., limite massimo di 3 notti per settimana per dipendente.
+- Vincoli di riposo minimo: due turni troppo ravvicinati per lo stesso dipendente sono vietati se non rispettano il riposo minimo (che può essere globale o per singolo dipendente).
+- Vincoli di conflitto tra turni: se due turni sono in conflitto (rest_conflicts), lo stesso dipendente non può essere assegnato a entrambi.
+- Vincoli di ore massime e minime per dipendente:
+        - Per dipendenti contrattualizzati: ore lavorate + assenze devono essere tra le ore contrattuali e il massimo concesso (incluso straordinario).
+        - Per esterni: se usati, devono lavorare tra min e max ore settimanali; se non usati, 0 ore.
+     
+**Penalità computate dalla Funzione Obiettivo (ordine decrescente di peso)**:
+- Unmet demand : minuti non coperti da personale richiesto 
+- Unmet skill: minuti senza copertura di skill
+- External usage: minuti di uso di risorse esterne
+- Overtime: minuti di straordinario,
+- Overstaffing (minuti)
+- Preferences: preferenze dipendenti
+- Fairness (equilibrio del carico).
 
 4. **Output**
    - `assignments.csv`: assegnazioni definitive.
@@ -106,12 +117,12 @@ Ogni preferenza appartiene al range [-2, 2 ] in base a una scala di gradimento (
 Sezione tipica:
 ```yaml
 penalties:
-  w_unmet_window: 1000
-  w_unmet_skill: 500
-  w_overtime: 50
-  w_overstaff: 5
-  w_preferences: 1
-  w_fairness: 0.5
+  - w_unmet_window: 1000
+  - w_unmet_skill: 500
+  - w_overtime: 50
+  - w_overstaff: 5
+  - w_preferences: 1
+  - w_fairness: 0.5
 rest:
   min_between_shifts: 11  # ore di riposo minimo
 solver:
@@ -141,15 +152,20 @@ solver:
 - **Finestre = domanda & competenze**: quante persone e quali skill servono in ogni momento.
 - **Multi-skill**: una stessa persona può coprire più requisiti skill nella stessa finestra.
 - **Contratti interni hard**: minimo ore obbligatorio; malattia e ferie contano come ore lavorate.
-- **Overstaffing**: ammesso e inevitabile; penalizzato per ridurre l’eccesso superfluo.
+- **Overstaffing**: ammesso se inevitabile; penalizzato per ridurre l’eccesso superfluo.
 
 ---
 
 
 
-## TO-DO:TO DO: 
-- aggiungere reporting per windows skills
-- implementare lexicografica pura perchè i pesi con ordini di grandezza troppo diversi possono rallentare il solver
-- decidere come utilizzare time-off in modo più realistico
-- passare a logica multi-periodo / rolling-horizon
+## TO-DO: 
+- implementare lexicografica pura. Problema: attualmente si utilizzano i pesi delle penalità con ordini di grandezza diversi che rispecchiano le priorità. Avendo molte priorità diverse si rende necessario l'uso di numeri molto grandi -> il solver può gestirli ma viene è computazionalmente più oneroso, quindi più lento
+- decidere come utilizzare time-off in modo più realistico. Problema: attualmente si genera l'orario settimanale anche sulla base di ferie/malattie. Poco realistico. 
+- passare a logica multi-periodo / rolling-horizon.
+  IDEA:
+  - Eseguire una run iniziale per decidere l'orario settimanale, senza considerare permessi/malattie. Quello diventa l'orario "base".
+  - Eseguire una run che copra un orizzionte, ad esempio, di 2 settimane (quindi [t0,t2]) per generare l'orario tenendo conto di ferie/malattie in quelle due settimane e penalizzando i cambiamenti rispetto all'orario base per garantire la massima stabilità possibile.
+  - La successiva run viene eseguita con la logica rolling horizion, ovvero viene eseguita sull'intervallo [t1,t3]
+ 
+  
 
