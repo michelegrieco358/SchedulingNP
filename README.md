@@ -97,13 +97,13 @@ Ogni preferenza appartiene al range [-2, 2 ] in base a una scala di gradimento (
         - Per esterni: se usati, devono lavorare tra min e max ore settimanali; se non usati, 0 ore.
      
 **Penalità computate dalla Funzione Obiettivo (ordine decrescente di peso)**:
-     1. Unmet demand : minuti non coperti da personale richiesto 
-     2. Unmet skill: minuti senza copertura di skill
-     3. External usage: minuti di uso di risorse esterne
-     4. Overtime: minuti di straordinario,
-     6. Overstaffing (minuti)
-     7. Preferences: preferenze dipendenti
-     8. Fairness (equilibrio del carico).
+- Unmet demand : minuti non coperti da personale richiesto 
+- Unmet skill: minuti senza copertura di skill
+- External usage: minuti di uso di risorse esterne
+- Overtime: minuti di straordinario,
+- Overstaffing (minuti)
+- Preferences: preferenze dipendenti
+- Fairness (equilibrio del carico).
 
 4. **Output**
    - `assignments.csv`: assegnazioni definitive.
@@ -117,12 +117,12 @@ Ogni preferenza appartiene al range [-2, 2 ] in base a una scala di gradimento (
 Sezione tipica:
 ```yaml
 penalties:
-  w_unmet_window: 1000
-  w_unmet_skill: 500
-  w_overtime: 50
-  w_overstaff: 5
-  w_preferences: 1
-  w_fairness: 0.5
+  - w_unmet_window: 1000
+  - w_unmet_skill: 500
+  - w_overtime: 50
+  - w_overstaff: 5
+  - w_preferences: 1
+  - w_fairness: 0.5
 rest:
   min_between_shifts: 11  # ore di riposo minimo
 solver:
