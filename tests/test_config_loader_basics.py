@@ -15,7 +15,7 @@ def test_load_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert cfg.hours.max_weekly == 40
     assert cfg.skills.enable_slack is True
     assert cfg.objective.priority[0] == "unmet_window"
-    assert "external_usage" in cfg.objective.priority
+    assert list(cfg.objective.priority) == list(config_loader.PRIORITY_KEYS)
 
 
 def test_load_config_custom(tmp_path: Path) -> None:

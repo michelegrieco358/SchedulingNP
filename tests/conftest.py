@@ -23,6 +23,7 @@ _EMPLOYEES_HEADER = [
 ]
 
 
+
 def _write_csv(path: Path, rows: Iterable[Iterable[str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -83,8 +84,8 @@ def config_obj() -> config_loader.Config:
     return config_loader.Config()
 
 
-@pytest.fixture()
-def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) -> SimpleNamespace:
+
+def build_solver_from_data(data_dir: Path, cfg: config_loader.Config) -> SimpleNamespace:
     (
         employees,
         shifts_norm,
@@ -101,25 +102,25 @@ def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) 
         shift_soft_demand,
         window_skill_req,
         adaptive_data,
-    ) = model_cp._load_data(sample_data_dir, config_obj.rest.min_between_shifts, config_obj)
+    ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
 
     penalties = {
-        "unmet_window": config_obj.penalties.unmet_window,
-        "unmet_demand": config_obj.penalties.unmet_demand,
-        "unmet_skill": config_obj.penalties.unmet_skill,
-        "unmet_shift": config_obj.penalties.unmet_shift,
-        "overstaff": config_obj.penalties.overstaff,
-        "overtime": config_obj.penalties.overtime,
-        "preferences": config_obj.penalties.preferences,
-        "fairness": config_obj.penalties.fairness,
+        "unmet_window": cfg.penalties.unmet_window,
+        "unmet_demand": cfg.penalties.unmet_demand,
+        "unmet_skill": cfg.penalties.unmet_skill,
+        "unmet_shift": cfg.penalties.unmet_shift,
+        "overstaff": cfg.penalties.overstaff,
+        "overtime": cfg.penalties.overtime,
+        "preferences": cfg.penalties.preferences,
+        "fairness": cfg.penalties.fairness,
     }
-    objective_priority = list(config_obj.objective.priority)
+    objective_priority = list(cfg.objective.priority)
     objective_weights = model_cp._build_objective_weights(objective_priority, penalties)
 
     solver_cfg = model_cp.SolverConfig(
         max_seconds=10.0,
         log_search_progress=False,
-        global_min_rest_hours=config_obj.rest.min_between_shifts,
+        global_min_rest_hours=cfg.rest.min_between_shifts,
         overtime_priority=objective_weights.get("overtime", 0),
         shortfall_priority=objective_weights.get("unmet_demand", 0),
         window_shortfall_priority=objective_weights.get("unmet_window", 0),
@@ -129,9 +130,9 @@ def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) 
         fairness_weight=objective_weights.get("fairness", 0),
         default_overtime_cost_weight=objective_weights.get("overtime", 0),
         global_overtime_cap_minutes=None,
-        random_seed=config_obj.random.seed,
-        mip_gap=config_obj.solver.mip_gap,
-        skills_slack_enabled=config_obj.skills.enable_slack,
+        random_seed=cfg.random.seed,
+        mip_gap=cfg.solver.mip_gap,
+        skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
     )
 
@@ -154,13 +155,13 @@ def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) 
         adaptive_slot_data=adaptive_data,
     )
 
-    solver.demand_mode = config_obj.shifts.demand_mode
+    solver.demand_mode = cfg.shifts.demand_mode
     solver.build()
     cp_solver = solver.solve()
 
     return SimpleNamespace(
-        data_dir=sample_data_dir,
-        cfg=config_obj,
+        data_dir=data_dir,
+        cfg=cfg,
         solver_cfg=solver_cfg,
         solver=solver,
         cp_solver=cp_solver,
@@ -168,6 +169,20 @@ def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) 
         shifts=shifts_norm,
         availability=availability,
         assign_mask=assign_mask,
+        rest_conflicts=rest_conflicts,
+        overtime_costs=overtime_costs,
+        preferences=preferences,
+        emp_skills=emp_skills,
+        shift_skill_req=shift_skill_req,
+        window_demand_map=window_demand_map,
+        window_shifts=window_shifts,
+        window_duration_map=window_duration_map,
+        shift_soft_demand=shift_soft_demand,
         window_skill_req=window_skill_req,
         adaptive_data=adaptive_data,
     )
+
+
+@pytest.fixture()
+def sample_environment(sample_data_dir: Path, config_obj: config_loader.Config) -> SimpleNamespace:
+    return build_solver_from_data(sample_data_dir, config_obj)
