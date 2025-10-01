@@ -50,6 +50,23 @@ class SkillsConfig(BaseModel):
             raise ValueError(f"skill_mode deve essere uno tra {sorted(modes)}")
         return value
 
+class WindowsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    midnight_policy: str = Field("split")
+    warn_slots_threshold: int = Field(0, ge=0)
+    hard_slots_threshold: int = Field(0, ge=0)
+
+    @field_validator("midnight_policy")
+    @classmethod
+    def check_policy(cls, value: str) -> str:
+        allowed = {"split", "extend"}  # o le opzioni che vuoi supportare
+        value = value.strip().lower()
+        if value not in allowed:
+            raise ValueError(f"midnight_policy deve essere uno tra {sorted(allowed)}")
+        return value
+
+
 
 class ShiftsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -132,6 +149,7 @@ class Config(BaseModel):
     hours: HoursConfig = Field(default_factory=HoursConfig)
     rest: RestConfig = Field(default_factory=RestConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    windows: WindowsConfig = Field(default_factory=WindowsConfig)
     shifts: ShiftsConfig = Field(default_factory=ShiftsConfig)
     penalties: PenaltiesConfig = Field(default_factory=PenaltiesConfig)
     objective: ObjectiveConfig = Field(default_factory=ObjectiveConfig)
