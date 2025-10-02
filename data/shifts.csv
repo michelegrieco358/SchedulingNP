@@ -1,4 +1,4 @@
-dtshift_id,day,start,end,role
+shift_id,day,start,end,role
 S1_NURSE_MORNING,2025-10-07,06:00,14:00,nurse
 S1_NURSE_EVENING,2025-10-07,14:00,22:00,nurse
 S1_NURSE_NIGHT,2025-10-07,22:00,06:00,nurse

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
 def plot_coverage_heatmap(assignments_path, windows_path, slot_minutes=60):
     # Carica dati
