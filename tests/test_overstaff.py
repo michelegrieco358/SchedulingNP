@@ -78,6 +78,7 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
 
     cfg = config_loader.Config()
     cfg.penalties.overstaff = 0.3
+    cfg.penalties.external_use = 0.0
 
     (
         employees,
@@ -91,7 +92,6 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         shift_skill_req,
         window_demand_map,
         window_duration_map,
-        shift_soft_demand,
         window_skill_req,
         adaptive_data,
     ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
@@ -100,9 +100,9 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         'unmet_window': cfg.penalties.unmet_window,
         'unmet_demand': cfg.penalties.unmet_demand,
         'unmet_skill': cfg.penalties.unmet_skill,
-        'unmet_shift': cfg.penalties.unmet_shift,
         'overstaff': cfg.penalties.overstaff,
         'overtime': cfg.penalties.overtime,
+        'external_use': cfg.penalties.external_use,
         'preferences': cfg.penalties.preferences,
         'fairness': cfg.penalties.fairness,
     }
@@ -118,7 +118,7 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         shortfall_priority=objective_weights.get('unmet_demand', 0),
         window_shortfall_priority=objective_weights.get('unmet_window', 0),
         skill_shortfall_priority=objective_weights.get('unmet_skill', 0),
-        shift_shortfall_priority=objective_weights.get('unmet_shift', 0),
+        external_use_weight=objective_weights.get('external_use', 0),
         preferences_weight=objective_weights.get('preferences', 0),
         fairness_weight=objective_weights.get('fairness', 0),
         default_overtime_cost_weight=objective_weights.get('overtime', 0),
@@ -146,8 +146,8 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         adaptive_slot_data=adaptive_data,
     )
 
-    solver.shift_soft_demands = {'S1': 2}
     solver.build()
+    solver.model.Add(solver.shift_aggregate_vars['S1'] == 2)
     cp_solver = solver.solve()
 
     assert cp_solver.StatusName() == 'OPTIMAL'
@@ -172,6 +172,7 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
 
     cfg = config_loader.Config()
     cfg.penalties.overstaff = 0.3
+    cfg.penalties.external_use = 0.0
 
     (
         employees,
@@ -185,7 +186,6 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         shift_skill_req,
         window_demand_map,
         window_duration_map,
-        shift_soft_demand,
         window_skill_req,
         adaptive_data,
     ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
@@ -194,9 +194,9 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         'unmet_window': cfg.penalties.unmet_window,
         'unmet_demand': cfg.penalties.unmet_demand,
         'unmet_skill': cfg.penalties.unmet_skill,
-        'unmet_shift': cfg.penalties.unmet_shift,
         'overstaff': cfg.penalties.overstaff,
         'overtime': cfg.penalties.overtime,
+        'external_use': cfg.penalties.external_use,
         'preferences': cfg.penalties.preferences,
         'fairness': cfg.penalties.fairness,
     }
@@ -212,7 +212,7 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         shortfall_priority=objective_weights.get('unmet_demand', 0),
         window_shortfall_priority=objective_weights.get('unmet_window', 0),
         skill_shortfall_priority=objective_weights.get('unmet_skill', 0),
-        shift_shortfall_priority=objective_weights.get('unmet_shift', 0),
+        external_use_weight=objective_weights.get('external_use', 0),
         preferences_weight=objective_weights.get('preferences', 0),
         fairness_weight=objective_weights.get('fairness', 0),
         default_overtime_cost_weight=objective_weights.get('overtime', 0),
@@ -240,8 +240,8 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         adaptive_slot_data=adaptive_data,
     )
 
-    solver.shift_soft_demands = {'S1': 2}
     solver.build()
+    solver.model.Add(solver.shift_aggregate_vars['S1'] == 2)
     assert solver.using_window_demands
 
     cp_solver = solver.solve()

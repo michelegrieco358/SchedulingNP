@@ -18,28 +18,26 @@ windows:
 
 penalties:
   unmet_window: 2.0
-  unmet_demand: 1.0
-  unmet_skill: 0.8
-  unmet_shift: 0.6
+  unmet_demand: 2.0
+  unmet_skill: 1.0
   overtime: 0.30
   preferences: 0.33
   fairness: 0.05
 
 objective:
   priority:
-    - unmet_window
-    - unmet_demand
-    - unmet_skill
-    - unmet_shift
-    - overtime
-    - preferences
-    - fairness
+  - unmet_window
+  - unmet_demand
+  - unmet_skill
+  - overtime
+  - preferences
+  - fairness
 
 random:
   seed: 42
 
 solver:
-  time_limit_sec: 60
+  time_limit_sec: 120
   mip_gap: null
 
 logging:

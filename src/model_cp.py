@@ -43,18 +43,18 @@ def _weight_per_hour_to_minutes(weight_hour: float | int | None) -> float:
 BASE_WINDOW_WEIGHT_H = 2.0
 BASE_SHIFT_WEIGHT_H = 1.0
 BASE_SKILL_WEIGHT_H = 0.8
-BASE_SHIFT_SOFT_WEIGHT_H = 0.6
 BASE_OVERSTAFF_WEIGHT_H = 0.15
 BASE_OVERTIME_WEIGHT_H = 0.3
 BASE_FAIRNESS_WEIGHT_H = 0.05
 BASE_PREFERENCES_WEIGHT_H = 0.05
+BASE_EXTERNAL_USE_WEIGHT_H = 0.7
 
 DEFAULT_WINDOW_SHORTFALL_PRIORITY = int(BASE_WINDOW_WEIGHT_H * 100)
 DEFAULT_SHORTFALL_PRIORITY = int(BASE_SHIFT_WEIGHT_H * 100)
 DEFAULT_SKILL_SHORTFALL_PRIORITY = int(BASE_SKILL_WEIGHT_H * 100)
-DEFAULT_SHIFT_SOFT_PRIORITY = int(BASE_SHIFT_SOFT_WEIGHT_H * 100)
 DEFAULT_OVERSTAFF_PRIORITY = int(BASE_OVERSTAFF_WEIGHT_H * 100)
 DEFAULT_OVERTIME_PRIORITY = int(BASE_OVERTIME_WEIGHT_H * 100)
+DEFAULT_EXTERNAL_USE_WEIGHT = int(BASE_EXTERNAL_USE_WEIGHT_H * 100)
 DEFAULT_FAIRNESS_WEIGHT = int(BASE_FAIRNESS_WEIGHT_H * 100)
 DEFAULT_PREFERENCES_WEIGHT = int(BASE_PREFERENCES_WEIGHT_H * 100)
 DEFAULT_OVERTIME_COST_WEIGHT = int(BASE_OVERTIME_WEIGHT_H * 100)
@@ -93,7 +93,7 @@ class SolverConfig:
     shortfall_priority: int = DEFAULT_SHORTFALL_PRIORITY
     window_shortfall_priority: int = DEFAULT_WINDOW_SHORTFALL_PRIORITY
     skill_shortfall_priority: int = DEFAULT_SKILL_SHORTFALL_PRIORITY
-    shift_shortfall_priority: int = DEFAULT_SHIFT_SOFT_PRIORITY
+    external_use_weight: int = DEFAULT_EXTERNAL_USE_WEIGHT
     preferences_weight: int = DEFAULT_PREFERENCES_WEIGHT
     fairness_weight: int = DEFAULT_FAIRNESS_WEIGHT
     default_overtime_cost_weight: int = DEFAULT_OVERTIME_COST_WEIGHT
@@ -210,7 +210,6 @@ class ShiftSchedulingCpSolver:
         }
         for window_id in self.window_demands:
             self.window_duration_minutes.setdefault(window_id, 60)
-        self.shift_soft_demands = {}
         self.using_window_demands = bool(self.window_demands)
 
         priority = list(objective_priority) if objective_priority is not None else list(self.config.objective_priority)
@@ -219,8 +218,8 @@ class ShiftSchedulingCpSolver:
             "unmet_window": self.config.window_shortfall_priority,
             "unmet_demand": self.config.shortfall_priority,
             "unmet_skill": self.config.skill_shortfall_priority,
-            "unmet_shift": self.config.shift_shortfall_priority,
             "overtime": self.config.overtime_priority,
+            "external_use": getattr(self.config, "external_use_weight", DEFAULT_EXTERNAL_USE_WEIGHT),
             "preferences": self.config.preferences_weight,
             "fairness": self.config.fairness_weight,
         }
@@ -230,7 +229,7 @@ class ShiftSchedulingCpSolver:
         self.config.window_shortfall_priority = base_weights.get("unmet_window", self.config.window_shortfall_priority)
         self.config.shortfall_priority = base_weights.get("unmet_demand", self.config.shortfall_priority)
         self.config.skill_shortfall_priority = base_weights.get("unmet_skill", self.config.skill_shortfall_priority)
-        self.config.shift_shortfall_priority = base_weights.get("unmet_shift", self.config.shift_shortfall_priority)
+        self.config.external_use_weight = base_weights.get("external_use", getattr(self.config, "external_use_weight", DEFAULT_EXTERNAL_USE_WEIGHT))
         self.config.preferences_weight = base_weights.get("preferences", self.config.preferences_weight)
         self.config.fairness_weight = base_weights.get("fairness", self.config.fairness_weight)
         self.config.skills_slack_enabled = bool(self.config.skills_slack_enabled)
@@ -250,7 +249,6 @@ class ShiftSchedulingCpSolver:
         self.window_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.segment_overstaff_vars: dict[str, cp_model.IntVar] = {}
-        self.shift_soft_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_cost_weights: dict[str, int] = {}
@@ -318,7 +316,6 @@ class ShiftSchedulingCpSolver:
                 required_total = pd.to_numeric(self.shifts["required_staff"], errors="coerce").fillna(0).astype(int).sum()
                 if required_total > 0:
                     logger.info("Ignoro required_staff dei turni perchÃ¯Â¿Â½ Ã¯Â¿Â½ attiva la domanda da windows")
-        self._add_shift_soft_demand_constraints()
         self._add_skill_coverage_constraints()
         
         # MODALITÃƒâ‚¬ UNICA: sempre turni interi con segmentazione
@@ -406,25 +403,6 @@ class ShiftSchedulingCpSolver:
 
             assign_expr = sum(vars_for_shift) if vars_for_shift else 0
             self.model.Add(assign_expr + shortfall_var == required_staff + overstaff_var)
-
-
-    def _add_shift_soft_demand_constraints(self) -> None:
-        """Applica i minimi di domanda per singolo turno (soft)."""
-        self.shift_soft_shortfall_vars = {}
-        if not self.shift_soft_demands:
-            return
-
-        for shift_id, demand in self.shift_soft_demands.items():
-            if demand <= 0:
-                continue
-            # Usa la variabile aggregata y[s] invece di sum(x[e,s])
-            y_var = self.shift_aggregate_vars.get(shift_id)
-            slack = self.model.NewIntVar(0, demand, f"short_shift_soft__{shift_id}")
-            self.shift_soft_shortfall_vars[shift_id] = slack
-            if y_var is not None:
-                self.model.Add(y_var + slack >= demand)
-            else:
-                self.model.Add(slack >= demand)
 
 
     def _add_skill_coverage_constraints(self) -> None:
@@ -1161,21 +1139,6 @@ class ShiftSchedulingCpSolver:
             return 0, False
         return sum(terms), True
 
-    def _compute_shift_soft_shortfall_expr(self):
-        if not self.shift_soft_shortfall_vars:
-            return 0, False
-
-        terms = []
-        for shift_id, var in self.shift_soft_shortfall_vars.items():
-            duration = self.duration_minutes.get(shift_id)
-            if duration is None:
-                continue
-            terms.append(duration * var)
-
-        if not terms:
-            return 0, False
-        return sum(terms), True
-
     def _compute_overstaff_expr(self):
         terms: list[cp_model.LinearExpr] = []
 
@@ -1228,6 +1191,16 @@ class ShiftSchedulingCpSolver:
         if not terms:
             return 0, False
 
+        return sum(terms), True
+
+    def _compute_external_usage_expr(self):
+        """Somma i minuti assegnati alle risorse esterne."""
+        if not self.external_minutes_vars:
+            return 0, False
+
+        terms = list(self.external_minutes_vars.values())
+        if not terms:
+            return 0, False
         return sum(terms), True
 
     def _compute_preference_cost_expr(self):
@@ -1309,12 +1282,12 @@ class ShiftSchedulingCpSolver:
         shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
         skill_expr, has_skill = self._compute_skill_shortfall_expr()
         segment_skill_expr, has_segment_skill = self._compute_segment_skill_shortfall_expr()
-        shift_soft_expr, has_shift_soft = self._compute_shift_soft_shortfall_expr()
         overstaff_expr, has_overstaff = self._compute_overstaff_expr()
         overtime_expr, has_overtime = self._compute_overtime_cost_expr()
+        external_expr, has_external = self._compute_external_usage_expr()
         pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
-        
+
         # NUOVO: Termini per segmenti con turni interi (se preserve_shift_integrity=True)
         segment_expr, has_segment = self._compute_segment_shortfall_expr()
 
@@ -1322,9 +1295,9 @@ class ShiftSchedulingCpSolver:
             "unmet_window": (window_expr, has_window),
             "unmet_demand": (shortfall_expr, has_shortfall),
             "unmet_skill": (skill_expr, has_skill),
-            "unmet_shift": (shift_soft_expr, has_shift_soft),
             "overstaff": (overstaff_expr, has_overstaff),
             "overtime": (overtime_expr, has_overtime),
+            "external_use": (external_expr, has_external),
             "preferences": (pref_expr, has_pref),
             "fairness": (fairness_expr, has_fairness),
         }
@@ -1694,24 +1667,22 @@ class ShiftSchedulingCpSolver:
             "weight_per_min": weight_per_min
         }
         
-        # 4. Turni soft (demand minima)
-        shift_soft_minutes = 0
-        shift_soft_cost = 0.0
-        weight_per_min = self.objective_weights_minutes.get("unmet_shift", 0.0)
-        for shift_id, var in self.shift_soft_shortfall_vars.items():
-            shortfall_units = solver.Value(var)
-            if shortfall_units > 0:
-                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
-                minutes = shortfall_units * shift_duration
-                shift_soft_minutes += minutes
-                shift_soft_cost += minutes * weight_per_min
-        
-        breakdown["unmet_shift"] = {
-            "minutes": shift_soft_minutes,
-            "cost": shift_soft_cost,
-            "weight_per_min": weight_per_min
+        # 4. Utilizzo risorse esterne
+        external_minutes = 0
+        external_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("external_use", 0.0)
+        for emp_id, var in self.external_minutes_vars.items():
+            minutes = solver.Value(var)
+            if minutes > 0:
+                external_minutes += minutes
+                external_cost += minutes * weight_per_min
+
+        breakdown["external_use"] = {
+            "minutes": external_minutes,
+            "cost": external_cost,
+            "weight_per_min": weight_per_min,
         }
-        
+
         # 5. Overstaff
         overstaff_minutes = 0
         overstaff_cost = 0.0
@@ -1740,7 +1711,7 @@ class ShiftSchedulingCpSolver:
             "weight_per_min": weight_per_min
         }
 
-        # 6. Straordinari
+        # 7. Straordinari
         overtime_minutes = 0
         overtime_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("overtime", 0.0)
@@ -1756,7 +1727,7 @@ class ShiftSchedulingCpSolver:
             "weight_per_min": weight_per_min
         }
 
-        # 7. Preferenze (violazioni pesate)
+        # 8. Preferenze (violazioni pesate)
         pref_violations = 0
         pref_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("preferences", 0.0)
@@ -1774,7 +1745,7 @@ class ShiftSchedulingCpSolver:
             "mean_shift_minutes": self.mean_shift_minutes
         }
 
-        # 8. Fairness (deviazioni workload)
+        # 9. Fairness (deviazioni workload)
         fairness_deviations = 0
         fairness_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("fairness", 0.0)
@@ -1890,7 +1861,6 @@ def _load_data(
     dict[str, dict[str, int]],  # shift_skill_req
     dict[str, int],  # window_demand_map
     dict[str, int],  # window_duration_map
-    dict[str, int],  # shift_soft_demand
     dict[str, dict[str, int]],  # window_skill_requirements
     precompute.AdaptiveSlotData | None,  # adaptive_slot_data
 ]:
@@ -1975,8 +1945,6 @@ def _load_data(
     else:
         shift_skill_req = {}
 
-    shift_soft_demand: dict[str, int] = {}
-    
     # Map shifts to windows via demand_id (for legacy compatibility)
 
     rest_conflicts = precompute.conflict_pairs_for_rest(shifts_norm, global_min_rest_hours)
@@ -1994,7 +1962,6 @@ def _load_data(
         shift_skill_req,
         window_demand_map,
         window_duration_map,
-        shift_soft_demand,
         window_skill_req,
         adaptive_data,
     )
@@ -2036,9 +2003,9 @@ def main(argv: list[str] | None = None) -> int:
         "unmet_window": cfg.penalties.unmet_window,
         "unmet_demand": cfg.penalties.unmet_demand,
         "unmet_skill": cfg.penalties.unmet_skill,
-        "unmet_shift": cfg.penalties.unmet_shift,
         "overstaff": cfg.penalties.overstaff,
         "overtime": args.overtime_priority if args.overtime_priority is not None else cfg.penalties.overtime,
+        "external_use": cfg.penalties.external_use,
         "fairness": args.fairness_weight if args.fairness_weight is not None else cfg.penalties.fairness,
         "preferences": args.preferences_weight if args.preferences_weight is not None else cfg.penalties.preferences,
     }
@@ -2054,7 +2021,7 @@ def main(argv: list[str] | None = None) -> int:
         shortfall_priority=objective_weights.get("unmet_demand", 0),
         window_shortfall_priority=objective_weights.get("unmet_window", 0),
         skill_shortfall_priority=objective_weights.get("unmet_skill", 0),
-        shift_shortfall_priority=objective_weights.get("unmet_shift", 0),
+        external_use_weight=objective_weights.get("external_use", 0),
         preferences_weight=objective_weights.get("preferences", 0),
         fairness_weight=objective_weights.get("fairness", 0),
         default_overtime_cost_weight=default_ot_weight,
@@ -2088,7 +2055,6 @@ def main(argv: list[str] | None = None) -> int:
         shift_skill_req,
         window_demand_map,
         window_duration_map,
-        shift_soft_demand,
         window_skill_req,
         adaptive_data,
     ) = _load_data(args.data_dir, solver_cfg.global_min_rest_hours, cfg)

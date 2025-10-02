@@ -1,0 +1,8 @@
+role,overtime_cost_per_hour
+nurse,25.0
+icu_nurse,28.0
+doctor,45.0
+triage,22.0
+receptionist,18.0
+labtech,20.0
+radiology,26.0

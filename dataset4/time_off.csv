@@ -1,0 +1,7 @@
+employee_id,day,start_time,end_time,reason
+E018,2025-10-07,,,Personal
+E050,2025-10-06,08:00,12:00,Appointment
+E016,2025-10-06,08:00,12:00,Appointment
+E034,2025-10-06,,,Personal
+E035,2025-10-10,,,Personal
+E023,2025-10-09,,,Personal

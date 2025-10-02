@@ -287,18 +287,61 @@ class ScheduleReporter:
             # Crea figura
             plt.figure(figsize=(12, 6))
             
-            # Plot domanda
+            demand_label_used = False
+            covered_label_used = False
+            shortfall_label_used = False
+
             for i in range(len(coverage_df)):
-                plt.bar(x_times[i][0], coverage_df.iloc[i]["demand"], 
-                       width=(x_times[i][1] - x_times[i][0]).total_seconds()/3600,
-                       alpha=0.3, color='blue', label='Domanda' if i == 0 else None)
-            
-            # Plot copertura
-            for i in range(len(coverage_df)):
-                plt.bar(x_times[i][0], coverage_df.iloc[i]["assigned"],
-                       width=(x_times[i][1] - x_times[i][0]).total_seconds()/3600,
-                       alpha=0.6, color='green', label='Assegnati' if i == 0 else None)
-            
+                segment = coverage_df.iloc[i]
+                start_dt, end_dt = x_times[i]
+                width_hours = (end_dt - start_dt).total_seconds() / 3600
+
+                demand = float(segment["demand"])
+                assigned = float(segment["assigned"])
+
+                covered = min(assigned, demand)
+                shortfall = max(demand - assigned, 0.0)
+                overstaff = max(assigned - demand, 0.0)
+
+                if demand > 0:
+                    plt.bar(
+                        start_dt,
+                        demand,
+                        width=width_hours,
+                        color="lightgray",
+                        alpha=0.5,
+                        edgecolor="none",
+                        label="Domanda" if not demand_label_used else None,
+                    )
+                    demand_label_used = True
+
+                if covered > 0:
+                    plt.bar(
+                        start_dt,
+                        covered,
+                        width=width_hours,
+                        color="tab:green",
+                        alpha=0.8,
+                        edgecolor="none",
+                        label="Coperto" if not covered_label_used else None,
+                    )
+                    covered_label_used = True
+
+                if shortfall > 0:
+                    plt.bar(
+                        start_dt,
+                        shortfall,
+                        width=width_hours,
+                        bottom=covered,
+                        color="tab:red",
+                        alpha=0.8,
+                        edgecolor="none",
+                        label="Scopertura" if not shortfall_label_used else None,
+                    )
+                    shortfall_label_used = True
+
+                # L'overstaffing viene gestito nei report testuali; nel grafico non viene evidenziato
+
             # Formattazione
             plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=2))
@@ -306,7 +349,7 @@ class ScheduleReporter:
             
             plt.title('Domanda vs Copertura per Intervallo')
             plt.xlabel('Ora')
-            plt.ylabel('Personale')
+            plt.ylabel('Minuti-persona')
             plt.legend()
             plt.grid(True, alpha=0.3)
             
