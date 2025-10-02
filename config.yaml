@@ -1,7 +1,7 @@
 hours:
   min_weekly: 0
   max_weekly: 40
-  max_daily: 10
+  max_daily: 12
   max_overtime: 4
 rest:
   min_between_shifts: 8
