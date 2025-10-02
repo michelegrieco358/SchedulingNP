@@ -1,0 +1,7 @@
+# Ignora file e cartelle temporanee di Python
+__pycache__/
+*.pyc
+# Altri file comuni da ignorare
+.env
+*.log
+.DS_Store
