@@ -501,7 +501,7 @@ def load_windows(
     _ensure_columns(df, WINDOW_BASE_COLS, path.name)
 
     df = df.copy()
-
+    # Regola: window_id deve essere unico. In caso di duplicati, viene mantenuta solo l'ultima occorrenza.
     # window_id: evita "nan" stringa e scarta vuoti/NaN
     s = df["window_id"].astype("string").str.strip()
     valid = s.notna() & (s != "")
@@ -509,7 +509,7 @@ def load_windows(
     if df.empty:
         raise ValueError(f"{path.name}: tutte le finestre prive di identificativo valido sono state scartate")
     df.loc[:, "window_id"] = s[valid]
-
+    #Il file windows.csv deve contenere solo record in cui il campo end è maggiore o uguale al campo start. Record con end < start non sono accettati e vengono ignorati o generano errore.
     # duplicati window_id: warning e tieni l'ultima occorrenza
     if df["window_id"].duplicated().any():
         warnings.warn("windows.csv: window_id duplicati, mantengo l'ultima occorrenza", RuntimeWarning)
@@ -528,6 +528,7 @@ def load_windows(
     if (df["window_demand"] < 0).any():
         raise ValueError(f"{path.name}: window_demand deve essere >= 0")
 
+    # Regola: window_end deve essere strettamente maggiore di window_start
     invalid_bounds = df["window_end_min"] <= df["window_start_min"]
     if invalid_bounds.any():
         bad_ids = df.loc[invalid_bounds, "window_id"].tolist()

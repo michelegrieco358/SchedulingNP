@@ -1,0 +1,6 @@
+employee_id,day,start_time,end_time,reason
+E003,2025-11-02,12:00,18:00,Sick leave
+E012,2025-11-03,,,Conference
+E021,2025-11-05,08:00,12:00,Personal
+E027,2025-11-06,14:00,18:00,Training
+E035,2025-11-07,,,Vacation

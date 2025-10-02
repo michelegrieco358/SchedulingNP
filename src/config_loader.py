@@ -54,8 +54,8 @@ class WindowsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     midnight_policy: str = Field("split")
-    warn_slots_threshold: int = Field(0, ge=0)
-    hard_slots_threshold: int = Field(0, ge=0)
+    warn_slots_threshold: int = Field(500, ge=0)
+    hard_slots_threshold: int = Field(2000, ge=0)
 
     @field_validator("midnight_policy")
     @classmethod

@@ -118,7 +118,6 @@ class ShiftSchedulingCpSolver:
         shift_skill_requirements: Mapping[str, Mapping[str, int]] | None = None,
         window_skill_requirements: Mapping[str, Mapping[str, int]] | None = None,
         window_demands: Mapping[str, int] | None = None,
-        window_shifts: Mapping[str, Sequence[str]] | None = None,
         window_duration_minutes: Mapping[str, int] | None = None,
         config: SolverConfig | None = None,
         objective_priority: Sequence[str] | None = None,
@@ -202,11 +201,7 @@ class ShiftSchedulingCpSolver:
                 demand_int = int(demand)
                 if demand_int > 0:
                     self.window_demands[str(window_id)] = demand_int
-        provided_window_shifts = window_shifts or {}
-        self.window_shifts = {
-            str(window_id): [str(shift_id) for shift_id in shifts_list if str(shift_id) in valid_shift_ids]
-            for window_id, shifts_list in provided_window_shifts.items()
-        }
+        self.window_shifts: dict[str, list[str]] = {}
         window_duration_src = window_duration_minutes or {}
         self.window_duration_minutes = {
             str(window_id): max(1, int(duration))
@@ -214,7 +209,6 @@ class ShiftSchedulingCpSolver:
             if int(duration) > 0
         }
         for window_id in self.window_demands:
-            self.window_shifts.setdefault(window_id, [])
             self.window_duration_minutes.setdefault(window_id, 60)
         self.shift_soft_demands = {}
         self.using_window_demands = bool(self.window_demands)
@@ -252,8 +246,10 @@ class ShiftSchedulingCpSolver:
         self._vars_by_shift_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
         self._vars_by_emp: dict[str, list[tuple[str, cp_model.BoolVar]]] = {}
         self.shortfall_vars: dict[str, cp_model.IntVar] = {}
+        self.shift_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.window_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_overstaff_vars: dict[str, cp_model.IntVar] = {}
+        self.segment_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.shift_soft_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
@@ -388,6 +384,7 @@ class ShiftSchedulingCpSolver:
     def _add_shift_coverage_constraints(self) -> None:
         """Gestisce la copertura dei turni consentendo scoperture penalizzate."""
         self.shortfall_vars = {}
+        self.shift_overstaff_vars = {}
         for _, shift_row in self.shifts.iterrows():
             shift_id = shift_row["shift_id"]
             required_staff = int(shift_row["required_staff"])
@@ -400,11 +397,15 @@ class ShiftSchedulingCpSolver:
             if not vars_for_shift:
                 print(f"[WARN] Turno {shift_id}: nessun dipendente assegnabile, verranno contabilizzati minuti di shortfall")
 
-            shortfall_var = self.model.NewIntVar(0, required_staff, f"shortfall__{shift_id}")
+            shortfall_var = self.model.NewIntVar(0, max(0, required_staff), f"shortfall__{shift_id}")
             self.shortfall_vars[shift_id] = shortfall_var
 
+            max_overstaff = max(0, len(vars_for_shift))
+            overstaff_var = self.model.NewIntVar(0, max_overstaff, f"overstaff__{shift_id}")
+            self.shift_overstaff_vars[shift_id] = overstaff_var
+
             assign_expr = sum(vars_for_shift) if vars_for_shift else 0
-            self.model.Add(assign_expr + shortfall_var == required_staff)
+            self.model.Add(assign_expr + shortfall_var == required_staff + overstaff_var)
 
 
     def _add_shift_soft_demand_constraints(self) -> None:
@@ -463,7 +464,7 @@ class ShiftSchedulingCpSolver:
     def _add_segment_coverage_constraints(self) -> None:
         """
         NUOVO: Implementa vincoli di copertura per segmenti con turni interi.
-        
+
         Quando preserve_shift_integrity=True, questo metodo:
         1. Mantiene la segmentazione temporale per calcolare la domanda
         2. Ma usa solo variabili aggregate y[s] dei turni interi
@@ -475,58 +476,74 @@ class ShiftSchedulingCpSolver:
         - E d_s = domanda richiesta nel segmento s (persona-minuti)
         """
         self.segment_shortfall_vars = {}
-        
+        self.segment_overstaff_vars = {}
+
+        has_window_demand = any(val > 0 for val in (self.window_demands or {}).values())
+
         # Solo se abbiamo dati di segmentazione
         if not self.adaptive_slot_data:
+            if self.using_window_demands and has_window_demand:
+                raise RuntimeError(
+                    "Modalita domanda per finestra attiva ma dati di segmentazione assenti. "
+                    "Verifica windows.csv e gli avvisi generati dal precompute."
+                )
             logger.info("Vincoli segmenti con turni interi: nessun dato di segmentazione disponibile")
             return
-            
+
         # Precomputa mappature turno -> segmenti e domande per segmento
         self._precompute_shift_to_segments_mapping()
         self._compute_segment_demands()
-        
+
         if not self.segment_demands:
+            if self.using_window_demands and has_window_demand:
+                raise RuntimeError(
+                    "Modalita domanda per finestra attiva ma nessuna domanda di segmento calcolata. "
+                    "Controlla che le finestre siano mappate correttamente agli slot (ruoli/orari validi)."
+                )
             logger.info("Vincoli segmenti con turni interi: nessuna domanda di segmento calcolata")
             return
-        
+
         segment_count = 0
         constraint_count = 0
-        
-        # Per ogni segmento con domanda > 0
+
         for segment_id, demand_person_minutes in self.segment_demands.items():
-            if demand_person_minutes <= 0:
+            if demand_person_minutes < 0:
                 continue
-                
+
+            segment_duration = self._get_segment_duration_minutes(segment_id)
+            if segment_duration <= 0:
+                continue
+
             segment_count += 1
-            
-            # Trova tutti i turni che coprono questo segmento
-            covering_shifts = []
+
+            covering_shifts: list[str] = []
             for shift_id, segments in self.shift_to_covering_segments.items():
                 if segment_id in segments:
                     covering_shifts.append(shift_id)
-            
-            # Calcola capacitÃƒÂ  fornita da ogni turno nel segmento
+
             covering_terms = []
+            capacity_bound = 0
             for shift_id in covering_shifts:
                 y_var = self.shift_aggregate_vars.get(shift_id)
-                if y_var is not None:
-                    # CapacitÃƒÂ  = durata_segmento * y[shift] (persona-minuti)
-                    segment_duration = self._get_segment_duration_minutes(segment_id)
-                    if segment_duration > 0:
-                        # Termine: segment_duration * y[shift_id]
-                        covering_terms.append(segment_duration * y_var)
-            
-            # Crea variabile di slack per segmento
-            slack_var = self.model.NewIntVar(0, demand_person_minutes, f"short_segment__{segment_id}")
+                if y_var is None:
+                    continue
+                covering_terms.append(segment_duration * y_var)
+                eligible = len(self._vars_by_shift.get(shift_id, []))
+                if eligible > 0:
+                    capacity_bound += segment_duration * eligible
+
+            slack_var = self.model.NewIntVar(0, max(0, int(demand_person_minutes)), f"short_segment__{segment_id}")
             self.segment_shortfall_vars[segment_id] = slack_var
-            
-            # Vincolo: Ã¢Ë†â€˜_{turni che coprono segmento} capacitÃƒÂ  + slack >= domanda
+
+            overstaff_ub = max(0, capacity_bound)
+            overstaff_var = self.model.NewIntVar(0, overstaff_ub, f"overstaff_segment__{segment_id}")
+            self.segment_overstaff_vars[segment_id] = overstaff_var
+
             if covering_terms:
-                self.model.Add(sum(covering_terms) + slack_var >= demand_person_minutes)
+                self.model.Add(sum(covering_terms) + slack_var == demand_person_minutes + overstaff_var)
             else:
-                # Nessun turno copre il segmento -> tutto shortfall
-                self.model.Add(slack_var >= demand_person_minutes)
-            
+                self.model.Add(slack_var == demand_person_minutes)
+
             constraint_count += 1
         
         if segment_count > 0:
@@ -1159,6 +1176,29 @@ class ShiftSchedulingCpSolver:
             return 0, False
         return sum(terms), True
 
+    def _compute_overstaff_expr(self):
+        terms: list[cp_model.LinearExpr] = []
+
+        if self.shift_overstaff_vars:
+            if not self.duration_minutes:
+                raise ValueError("Le durate dei turni devono essere disponibili per calcolare il costo di overstaff.")
+            for shift_id, var in self.shift_overstaff_vars.items():
+                duration = self.duration_minutes.get(shift_id)
+                if duration is None:
+                    continue
+                terms.append(duration * var)
+
+        segment_vars = getattr(self, "segment_overstaff_vars", None)
+        if segment_vars:
+            for segment_id, var in segment_vars.items():
+                if var is None:
+                    continue
+                terms.append(var)
+
+        if not terms:
+            return 0, False
+        return sum(terms), True
+
     def _compute_skill_shortfall_expr(self):
         if not self.skill_shortfall_vars:
             return 0, False
@@ -1270,6 +1310,7 @@ class ShiftSchedulingCpSolver:
         skill_expr, has_skill = self._compute_skill_shortfall_expr()
         segment_skill_expr, has_segment_skill = self._compute_segment_skill_shortfall_expr()
         shift_soft_expr, has_shift_soft = self._compute_shift_soft_shortfall_expr()
+        overstaff_expr, has_overstaff = self._compute_overstaff_expr()
         overtime_expr, has_overtime = self._compute_overtime_cost_expr()
         pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
@@ -1282,6 +1323,7 @@ class ShiftSchedulingCpSolver:
             "unmet_demand": (shortfall_expr, has_shortfall),
             "unmet_skill": (skill_expr, has_skill),
             "unmet_shift": (shift_soft_expr, has_shift_soft),
+            "overstaff": (overstaff_expr, has_overstaff),
             "overtime": (overtime_expr, has_overtime),
             "preferences": (pref_expr, has_pref),
             "fairness": (fairness_expr, has_fairness),
@@ -1670,7 +1712,35 @@ class ShiftSchedulingCpSolver:
             "weight_per_min": weight_per_min
         }
         
-        # 5. Straordinari
+        # 5. Overstaff
+        overstaff_minutes = 0
+        overstaff_cost = 0.0
+        weight_per_min = self.objective_weights_minutes.get("overstaff", 0.0)
+
+        if self.shift_overstaff_vars:
+            for shift_id, var in self.shift_overstaff_vars.items():
+                units = solver.Value(var)
+                if units > 0:
+                    duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+                    minutes = units * duration
+                    overstaff_minutes += minutes
+                    overstaff_cost += minutes * weight_per_min
+
+        segment_vars = getattr(self, "segment_overstaff_vars", None)
+        if segment_vars:
+            for segment_id, var in segment_vars.items():
+                value = solver.Value(var)
+                if value > 0:
+                    overstaff_minutes += value
+                    overstaff_cost += value * weight_per_min
+
+        breakdown["overstaff"] = {
+            "minutes": overstaff_minutes,
+            "cost": overstaff_cost,
+            "weight_per_min": weight_per_min
+        }
+
+        # 6. Straordinari
         overtime_minutes = 0
         overtime_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("overtime", 0.0)
@@ -1679,33 +1749,32 @@ class ShiftSchedulingCpSolver:
             if ot_minutes > 0:
                 overtime_minutes += ot_minutes
                 overtime_cost += ot_minutes * weight_per_min
-        
+
         breakdown["overtime"] = {
             "minutes": overtime_minutes,
             "cost": overtime_cost,
             "weight_per_min": weight_per_min
         }
-        
-        # 6. Preferenze (violazioni pesate)
+
+        # 7. Preferenze (violazioni pesate)
         pref_violations = 0
         pref_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("preferences", 0.0)
         for (emp_id, shift_id), var in self.assignment_vars.items():
             if solver.Value(var):
                 score = self.preference_score_by_pair.get((emp_id, shift_id), 0)
-                if score < 0:  # Solo violazioni (preferenze negative)
+                if score < 0:
                     pref_violations += abs(score)
-                    # Costo = |score| * mean_shift_minutes * weight_per_min
                     pref_cost += abs(score) * self.mean_shift_minutes * weight_per_min
-        
+
         breakdown["preferences"] = {
             "violations": pref_violations,
             "cost": pref_cost,
             "weight_per_min": weight_per_min,
             "mean_shift_minutes": self.mean_shift_minutes
         }
-        
-        # 7. Fairness (deviazioni workload)
+
+        # 8. Fairness (deviazioni workload)
         fairness_deviations = 0
         fairness_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("fairness", 0.0)
@@ -1714,13 +1783,13 @@ class ShiftSchedulingCpSolver:
             if deviation > 0:
                 fairness_deviations += deviation
                 fairness_cost += deviation * weight_per_min
-        
+
         breakdown["fairness"] = {
             "deviations_minutes": fairness_deviations,
             "cost": fairness_cost,
             "weight_per_min": weight_per_min
         }
-        
+
         return breakdown
 
     def log_objective_breakdown(self, solver: cp_model.CpSolver) -> None:
@@ -1820,7 +1889,6 @@ def _load_data(
     dict[str, set[str]],  # emp_skills
     dict[str, dict[str, int]],  # shift_skill_req
     dict[str, int],  # window_demand_map
-    dict[str, list[str]],  # window_shifts
     dict[str, int],  # window_duration_map
     dict[str, int],  # shift_soft_demand
     dict[str, dict[str, int]],  # window_skill_requirements
@@ -1908,32 +1976,8 @@ def _load_data(
         shift_skill_req = {}
 
     shift_soft_demand: dict[str, int] = {}
-    window_shifts: dict[str, list[str]] = {}
     
     # Map shifts to windows via demand_id (for legacy compatibility)
-    if "demand_id" in shifts_norm.columns:
-        for _, row in shifts_norm.iterrows():
-            shift_id = str(row["shift_id"])
-            demand_id = str(row.get("demand_id", "")).strip()
-            if demand_id:
-                if demand_id not in window_demand_map:
-                    raise ValueError(f"Turno {shift_id}: demand_id '{demand_id}' non presente in windows.csv")
-                window_shifts.setdefault(demand_id, []).append(shift_id)
-
-    for demand_id, demand_value in window_demand_map.items():
-        shift_ids = window_shifts.get(demand_id, [])
-        if not shift_ids:
-            warnings.warn(
-                f"Finestra {demand_id}: nessun turno associato alla domanda",
-                RuntimeWarning,
-            )
-            continue
-        capacity = int(shifts_norm[shifts_norm["shift_id"].isin(shift_ids)]["required_staff"].astype(int).sum())
-        if demand_value > capacity:
-            warnings.warn(
-                f"Finestra {demand_id}: domanda {demand_value} supera la capacita teorica {capacity}",
-                RuntimeWarning,
-            )
 
     rest_conflicts = precompute.conflict_pairs_for_rest(shifts_norm, global_min_rest_hours)
     overtime_costs = loader.load_overtime_costs(data_dir / "overtime_costs.csv")
@@ -1949,7 +1993,6 @@ def _load_data(
         emp_skills,
         shift_skill_req,
         window_demand_map,
-        window_shifts,
         window_duration_map,
         shift_soft_demand,
         window_skill_req,
@@ -2044,7 +2087,6 @@ def main(argv: list[str] | None = None) -> int:
         emp_skills,
         shift_skill_req,
         window_demand_map,
-        window_shifts,
         window_duration_map,
         shift_soft_demand,
         window_skill_req,
@@ -2072,8 +2114,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if window_demand_map:
         window_count = len(window_demand_map)
-        mapped_shifts = sum(len(window_shifts.get(wid, [])) for wid in window_demand_map)
-        logger.info("Domande aggregate: %d finestre (%d turni associati)", window_count, mapped_shifts)
+        logger.info("Domande aggregate attive: %d finestre", window_count)
     else:
         logger.info("Nessuna domanda aggregata attiva")
 
@@ -2088,7 +2129,6 @@ def main(argv: list[str] | None = None) -> int:
         shift_skill_requirements=shift_skill_req,
         window_skill_requirements=window_skill_req,
         window_demands=window_demand_map,
-        window_shifts=window_shifts,
         window_duration_minutes=window_duration_map,
         config=solver_cfg,
         objective_priority=objective_priority,
@@ -2101,7 +2141,10 @@ def main(argv: list[str] | None = None) -> int:
     solver.build()
     cp_solver = solver.solve()
 
-    print("Stato solver:", cp_solver.StatusName())
+    status = cp_solver.StatusName()
+    print("Stato solver:", status)
+    if status not in {"OPTIMAL", "FEASIBLE"}:
+        return 1
 
     # Generazione report diagnostici tramite ScheduleReporter
     try:
