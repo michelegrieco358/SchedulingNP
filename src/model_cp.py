@@ -9,6 +9,7 @@ import argparse
 import logging
 import warnings
 from datetime import datetime, timedelta
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Mapping, Sequence
@@ -124,6 +125,7 @@ class ShiftSchedulingCpSolver:
         objective_weights: Mapping[str, int] | None = None,
         # Parametri per segmentazione temporale
         adaptive_slot_data: object | None = None,
+        global_hours: object | None = None,
     ) -> None:
         self.employees = employees
         self.shifts = shifts
@@ -132,6 +134,31 @@ class ShiftSchedulingCpSolver:
         self.overtime_costs = overtime_costs
         self.preferences = preferences
         self.config = config or SolverConfig()
+        self.global_hours = global_hours
+        self.global_min_weekly = float(getattr(global_hours, "min_weekly", 0.0)) if global_hours is not None else 0.0
+        max_weekly_value = getattr(global_hours, "max_weekly", None) if global_hours is not None else None
+        self.global_max_weekly = float(max_weekly_value) if max_weekly_value is not None else None
+        max_daily_value = getattr(global_hours, "max_daily", None) if global_hours is not None else None
+        if max_daily_value is not None:
+            max_daily_float = float(max_daily_value)
+            if math.isfinite(max_daily_float):
+                self.global_max_daily = max_daily_float
+                self.global_max_daily_minutes = max(0, int(round(max_daily_float * 60)))
+            else:
+                self.global_max_daily = None
+                self.global_max_daily_minutes = None
+        else:
+            self.global_max_daily = None
+            self.global_max_daily_minutes = None
+
+        raw_max_overtime = getattr(global_hours, "max_overtime", 0.0) if global_hours is not None else 0.0
+        try:
+            max_ot_float = float(raw_max_overtime)
+        except (TypeError, ValueError):
+            max_ot_float = 0.0
+        if not math.isfinite(max_ot_float) or max_ot_float < 0:
+            max_ot_float = 0.0
+        self.global_max_overtime_hours = max_ot_float
 
         self.emp_skills = {str(emp_id): set(skills) for emp_id, skills in (emp_skills or {}).items()}
         valid_shift_ids = set(self.shifts["shift_id"].astype(str)) if "shift_id" in self.shifts.columns else set()
@@ -201,7 +228,6 @@ class ShiftSchedulingCpSolver:
                 demand_int = int(demand)
                 if demand_int > 0:
                     self.window_demands[str(window_id)] = demand_int
-        self.window_shifts: dict[str, list[str]] = {}
         window_duration_src = window_duration_minutes or {}
         self.window_duration_minutes = {
             str(window_id): max(1, int(duration))
@@ -334,6 +360,7 @@ class ShiftSchedulingCpSolver:
         self._initialize_objective_weights_minutes()
         self.mean_shift_minutes = self.avg_shift_minutes  # Per preferenze
         self._add_employee_max_hours_constraints()
+        self._add_employee_daily_max_constraints()
         self._add_one_shift_per_day_constraints()
         self._add_night_shift_constraints()
         self._add_rest_conflict_constraints()
@@ -977,10 +1004,27 @@ class ShiftSchedulingCpSolver:
             # NUOVA LOGICA: Usa contracted_hours come base per la distinzione
             contracted_h = emp_row.get("contracted_hours")
             min_h_raw = emp_row.get("min_week_hours")
-            min_h = float(min_h_raw) if pd.notna(min_h_raw) else 0.0  # Gestisce NaN correttamente
-            max_h = float(emp_row["max_week_hours"])
-            overtime = float(emp_row.get("max_overtime_hours", 0))
-            
+            default_min = self.global_min_weekly
+            min_h = float(min_h_raw) if pd.notna(min_h_raw) else default_min
+
+            max_h_raw = emp_row.get("max_week_hours")
+            if pd.notna(max_h_raw):
+                max_h = float(max_h_raw)
+            else:
+                max_h = self.global_max_weekly if self.global_max_weekly is not None else float("inf")
+
+            overtime_raw = emp_row.get("max_overtime_hours")
+            if pd.notna(overtime_raw):
+                overtime = float(overtime_raw)
+            elif getattr(self, "global_max_overtime_hours", None) is not None:
+                overtime = float(self.global_max_overtime_hours)
+            else:
+                overtime = 0.0
+            if not math.isfinite(overtime):
+                overtime = 0.0
+            overtime = max(0.0, overtime)
+            overtime_minutes = int(round(overtime * 60)) if overtime > 0 else 0
+
             # Determina se ÃƒÂ¨ contrattualizzato basandosi su contracted_hours
             is_contracted = pd.notna(contracted_h)
             
@@ -995,9 +1039,9 @@ class ShiftSchedulingCpSolver:
                 # - Considera le assenze (time_off) come ore giÃƒÂ  conteggiate verso il contratto
                 
                 contracted_minutes = int(float(contracted_h) * 60)
-                overtime_var = self.model.NewIntVar(0, int(overtime * 60), f"overtime_min__{emp_id}")
+                overtime_var = self.model.NewIntVar(0, overtime_minutes, f"overtime_min__{emp_id}")
                 self.overtime_vars[emp_id] = overtime_var
-                self.overtime_limits[emp_id] = int(overtime * 60)
+                self.overtime_limits[emp_id] = overtime_minutes
 
                 # Calcola time_off_minutes per questo dipendente
                 time_off_minutes = self._calculate_time_off_minutes(emp_id)
@@ -1018,7 +1062,11 @@ class ShiftSchedulingCpSolver:
                 # - NON creare variabili di overtime
                 
                 min_minutes = int(min_h * 60)
-                max_minutes = int(max_h * 60)
+                if math.isfinite(max_h):
+                    max_minutes = int(max_h * 60)
+                else:
+                    max_minutes = sum(self.duration_minutes.get(shift_id, 0) for shift_id, _ in pairs)
+                max_minutes = max(max_minutes, min_minutes)
                 
                 # Nessuna variabile straordinari per lavoratori non contrattualizzati
                 self.overtime_vars[emp_id] = self.model.NewIntVar(0, 0, f"overtime_min__{emp_id}")  # Sempre 0
@@ -1045,7 +1093,7 @@ class ShiftSchedulingCpSolver:
                 self.external_minutes_vars[emp_id] = ext_minutes_var
                 logger.debug(f"Worker {emp_id}: RISORSA ESTERNA - min={min_h}h, max={max_h}h (attivazione condizionale)")
 
-            total_possible_ot += int(overtime * 60)
+            total_possible_ot += overtime_minutes
             self.overtime_cost_weights[emp_id] = self._resolve_overtime_cost_weight(emp_row)
 
         self.total_possible_overtime_minutes = total_possible_ot
@@ -1056,6 +1104,65 @@ class ShiftSchedulingCpSolver:
             self.model.Add(sum(self.overtime_vars.values()) <= cap_minutes)
         else:
             self.global_overtime_cap_minutes = None
+
+    def _add_employee_daily_max_constraints(self) -> None:
+        """Applica il limite giornaliero globale di ore per ciascun dipendente."""
+        if getattr(self, "global_max_daily_minutes", None) is None:
+            return
+        if "start_dt" not in self.shifts.columns:
+            raise ValueError("La tabella shifts deve includere la colonna 'start_dt'.")
+
+        daily_limit_minutes = int(self.global_max_daily_minutes)
+        start_dt_series = self.shifts.set_index("shift_id")["start_dt"]
+        end_dt_series = self.shifts.set_index("shift_id")["end_dt"]
+
+        daily_minutes_by_shift: dict[str, dict] = {}
+        for shift_id, start_dt in start_dt_series.items():
+            if pd.isna(start_dt):
+                continue
+            end_dt = end_dt_series.get(shift_id)
+            if pd.isna(end_dt):
+                continue
+            current_start = start_dt
+            segments: dict = {}
+            while current_start < end_dt:
+                next_midnight = datetime.combine(current_start.date(), datetime.min.time()) + timedelta(days=1)
+                current_end = min(end_dt, next_midnight)
+                delta_minutes = int((current_end - current_start).total_seconds() / 60)
+                if delta_minutes > 0:
+                    segments[current_start.date()] = segments.get(current_start.date(), 0) + delta_minutes
+                current_start = current_end
+            if not segments:
+                duration = self.duration_minutes.get(shift_id)
+                if duration is not None:
+                    day_key = start_dt.date() if hasattr(start_dt, "date") else start_dt
+                    segments[day_key] = int(duration)
+            if segments:
+                daily_minutes_by_shift[str(shift_id)] = segments
+
+        for emp_id, pairs in self._vars_by_emp.items():
+            minutes_by_day: dict = {}
+            for shift_id, var in pairs:
+                segments = daily_minutes_by_shift.get(str(shift_id))
+                if not segments:
+                    duration = self.duration_minutes.get(shift_id)
+                    if duration is None:
+                        raise ValueError(f"Durata mancante per il turno {shift_id}")
+                    start_dt = start_dt_series.get(shift_id)
+                    if start_dt is None:
+                        continue
+                    day_key = start_dt.date() if hasattr(start_dt, "date") else start_dt
+                    minutes_by_day.setdefault(day_key, []).append((int(duration), var))
+                    continue
+                for day_key, minutes in segments.items():
+                    minutes_by_day.setdefault(day_key, []).append((minutes, var))
+
+            for entries in minutes_by_day.values():
+                if not entries:
+                    continue
+                expr = sum(minutes * var for minutes, var in entries)
+                self.model.Add(expr <= daily_limit_minutes)
+
 
     def _calculate_time_off_minutes(self, emp_id: str) -> int:
         """
@@ -1865,7 +1972,7 @@ def _load_data(
     precompute.AdaptiveSlotData | None,  # adaptive_slot_data
 ]:
     employees = loader.load_employees(data_dir / "employees.csv")
-    shifts = loader.load_shifts(data_dir / "shifts.csv")
+    shifts = loader.load_shifts(data_dir / "shifts.csv", max_daily_hours=getattr(cfg.hours, "max_daily", None))
     availability = loader.load_availability(data_dir / "availability.csv", employees, shifts)
 
     shifts_norm = precompute.normalize_shift_times(shifts)
@@ -1889,48 +1996,64 @@ def _load_data(
         preferences_filtered = assignable_pairs.assign(score=0)
 
     # NUOVO: Usa windows.csv invece di demand_windows.csv (obsoleto)
-    windows_df = loader.load_windows(data_dir / "windows.csv", shifts_norm)
+    coverage_source = getattr(cfg.shifts, "coverage_source", "windows")
+    coverage_source = coverage_source.strip().lower()
+    use_windows = coverage_source == "windows"
+
     window_demand_map: dict[str, int] = {}
     window_duration_map: dict[str, int] = {}
-    
-    if not windows_df.empty:
-        window_demand_map = {
-            str(row["window_id"]): int(row["window_demand"]) 
-            for _, row in windows_df.iterrows()
-        }
-        window_duration_map = {
-            str(row["window_id"]): int(row["window_minutes"]) 
-            for _, row in windows_df.iterrows()
-        }
-
     window_skill_req: dict[str, dict[str, int]] = {}
-    if not windows_df.empty and "skill_requirements" in windows_df.columns:
-        for _, row in windows_df.iterrows():
-            requirements = row.get("skill_requirements")
-            if not isinstance(requirements, dict):
-                continue
-            cleaned: dict[str, int] = {}
-            for skill_name, qty in requirements.items():
-                try:
-                    qty_int = int(qty)
-                except (TypeError, ValueError):
-                    continue
-                if qty_int > 0:
-                    cleaned[str(skill_name)] = qty_int
-            if cleaned:
-                window_skill_req[str(row["window_id"])] = cleaned
-
     adaptive_data: precompute.AdaptiveSlotData | None = None
-    if not windows_df.empty:
-        try:
-            adaptive_data = precompute.build_adaptive_slots(shifts_norm, cfg, windows_df)
-            adaptive_data, _, _ = precompute.map_windows_to_slots(adaptive_data, windows_df, merge_signatures=True)
-        except Exception as exc:  # pragma: no cover - diagnostica
-            warnings.warn(
-                f"Impossibile costruire gli slot adattivi: {exc}",
-                RuntimeWarning,
-            )
-            adaptive_data = None
+
+    windows_df: pd.DataFrame
+    if use_windows:
+        windows_path = data_dir / "windows.csv"
+        windows_df = loader.load_windows(windows_path, shifts_norm)
+
+        if not windows_df.empty:
+            window_demand_map = {
+                str(row["window_id"]): int(row["window_demand"])
+                for _, row in windows_df.iterrows()
+                if int(row["window_demand"]) > 0
+            }
+            window_duration_map = {
+                str(row["window_id"]): int(row["window_minutes"])
+                for _, row in windows_df.iterrows()
+            }
+
+            if "skill_requirements" in windows_df.columns:
+                for _, row in windows_df.iterrows():
+                    demand = window_demand_map.get(str(row["window_id"]), 0)
+                    if demand <= 0:
+                        continue
+                    requirements = row.get("skill_requirements")
+                    if not isinstance(requirements, dict):
+                        continue
+                    cleaned: dict[str, int] = {}
+                    for skill_name, qty in requirements.items():
+                        try:
+                            qty_int = int(qty)
+                        except (TypeError, ValueError):
+                            continue
+                        if qty_int > 0:
+                            cleaned[str(skill_name)] = qty_int
+                    if cleaned:
+                        window_skill_req[str(row["window_id"])] = cleaned
+
+            try:
+                adaptive_data = precompute.build_adaptive_slots(shifts_norm, cfg, windows_df)
+                adaptive_data, _, _ = precompute.map_windows_to_slots(adaptive_data, windows_df, merge_signatures=True)
+            except Exception as exc:  # pragma: no cover - diagnostica
+                warnings.warn(
+                    f"Impossibile costruire gli slot adattivi: {exc}",
+                    RuntimeWarning,
+                )
+                adaptive_data = None
+    else:
+        windows_df = pd.DataFrame()
+        windows_path = data_dir / "windows.csv"
+        if windows_path.exists():
+            logger.info("coverage_source='shifts': ignoro windows.csv per la domanda")
 
     emp_skills = {
         str(row["employee_id"]): set(row.get("skills_set", set()))
@@ -2100,6 +2223,7 @@ def main(argv: list[str] | None = None) -> int:
         objective_priority=objective_priority,
         objective_weights=objective_weights,
         adaptive_slot_data=adaptive_data,
+        global_hours=cfg.hours,
     )
     
     # Imposta demand_mode dal config

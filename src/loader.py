@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime, time, timedelta
 from dateutil import parser as dtparser
 
+import math
 import pandas as pd
 import warnings
 
@@ -124,8 +125,8 @@ def _parse_skill_list(value) -> set[str]:
     return set(tokens)
 
 
-def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
-    """Parsa la colonna skills di windows.csv in un dizionario {skill: quantity}."""
+def _parse_skill_mapping(raw_value, *, source: str, entity_id: str) -> dict[str, int]:
+    """Parsa una stringa "skill:qty" in un dizionario {skill: quantity}."""
     if pd.isna(raw_value):
         return {}
     text_value = str(raw_value).strip()
@@ -138,21 +139,31 @@ def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
         if not part:
             continue
         if ':' not in part:
-            raise ValueError(f"windows.csv: skills per {window_id} deve usare formato skill:quantity")
+            raise ValueError(f"{source}: skills per {entity_id} deve usare formato skill:quantity")
         skill_name, value_part = part.split(':', 1)
         skill_name = skill_name.strip()
         if not skill_name:
-            raise ValueError(f"windows.csv: skill vuota nella finestra {window_id}")
+            raise ValueError(f"{source}: skill vuota in {entity_id}")
         try:
             qty_int = int(str(value_part).strip())
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"windows.csv: valore non intero per skill {skill_name} della finestra {window_id}: {value_part}") from exc
+            raise ValueError(f"{source}: valore non intero per skill {skill_name} di {entity_id}: {value_part}") from exc
         if qty_int < 0:
-            raise ValueError(f"windows.csv: valore negativo per skill {skill_name} della finestra {window_id}")
+            raise ValueError(f"{source}: valore negativo per skill {skill_name} di {entity_id}")
         if qty_int > 0:
             normalized[skill_name] = qty_int
 
     return normalized
+
+
+def _parse_window_skills(raw_value, window_id: str) -> dict[str, int]:
+    """Parsa la colonna skills di windows.csv in un dizionario {skill: quantity}."""
+    return _parse_skill_mapping(raw_value, source="windows.csv", entity_id=str(window_id))
+
+
+def _parse_shift_skills(raw_value, shift_id: str) -> dict[str, int]:
+    """Parsa la colonna skills di shifts.csv in un dizionario {skill: quantity}."""
+    return _parse_skill_mapping(raw_value, source="shifts.csv", entity_id=str(shift_id))
 
 
 def _normalize_contracted_hours(df: pd.DataFrame) -> None:
@@ -288,7 +299,7 @@ def load_employees(path: Path) -> pd.DataFrame:
     return df
 
 
-def load_shifts(path: Path) -> pd.DataFrame:
+def load_shifts(path: Path, *, max_daily_hours: float | None = None) -> pd.DataFrame:
     """Carica e normalizza shifts.csv."""
     df = pd.read_csv(path)
     _ensure_columns(df, SHIFT_BASE_COLS, "shifts.csv")
@@ -330,6 +341,27 @@ def load_shifts(path: Path) -> pd.DataFrame:
         lambda row: _compute_duration_minutes(row["start_min"], row["end_min"], row["shift_id"]),
         axis=1,
     )
+
+    max_daily_minutes: int | None = None
+    if max_daily_hours is not None:
+        try:
+            max_daily_value = float(max_daily_hours)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"hours.max_daily non numerico: {max_daily_hours}") from exc
+        if math.isfinite(max_daily_value):
+            max_daily_minutes = max(0, int(round(max_daily_value * 60)))
+        else:
+            max_daily_minutes = None
+    if max_daily_minutes is not None:
+        too_long = df[df["duration_minutes"] > max_daily_minutes]
+        if not too_long.empty:
+            sample_ids = too_long["shift_id"].astype(str).tolist()
+            sample = ", ".join(sample_ids[:5])
+            raise ValueError(
+                "shifts.csv: durata turno oltre il limite max_daily configurato "
+                f"({max_daily_minutes / 60:.2f} h) per shift_id: {sample}"
+            )
+
     df["duration_h"] = df["duration_minutes"] / 60.0
 
     # datetime completi
@@ -340,12 +372,26 @@ def load_shifts(path: Path) -> pd.DataFrame:
     midnight_mask = df["crosses_midnight"] | (df["end_min"] == 1440)
     df.loc[midnight_mask, "end_dt"] = df.loc[midnight_mask, "end_dt"] + pd.Timedelta(days=1)
 
+    # skills opzionali sui turni (formato "skill:qty")
+    if "skills" in df.columns:
+        df["skills"] = df["skills"].fillna("").astype(str)
+        df["skill_requirements"] = df.apply(
+            lambda row: _parse_shift_skills(row["skills"], row["shift_id"]),
+            axis=1,
+        )
+    else:
+        df["skill_requirements"] = [{} for _ in range(len(df))]
+
     # demand_id opzionale
     if "demand_id" not in df.columns:
         df["demand_id"] = ""
     df["demand_id"] = df["demand_id"].fillna("").astype(str).str.strip()
 
-    mean_demand = df["demand"].mean() if "demand" in df.columns else float("nan")
+    mean_demand = float("nan")
+    if "required_staff" in df.columns:
+        mean_demand = pd.to_numeric(df["required_staff"], errors="coerce").mean()
+    elif "demand" in df.columns:
+        mean_demand = pd.to_numeric(df["demand"], errors="coerce").mean()
     summary = (
         f"shifts.csv: caricati {len(df)} turni, ruoli: {sorted(df['role'].unique())}, "
         f"domanda media: {mean_demand:.2f}"
@@ -737,7 +783,10 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None) -> SimpleN
 
     # --- Caricamento dataset base ---
     employees    = load_employees(data_dir / "employees.csv")
-    shifts       = load_shifts(data_dir / "shifts.csv")
+    max_daily_hours = None
+    if config is not None:
+        max_daily_hours = getattr(getattr(config, "hours", None), "max_daily", None)
+    shifts       = load_shifts(data_dir / "shifts.csv", max_daily_hours=max_daily_hours)
     availability = load_availability(data_dir / "availability.csv", employees, shifts)
 
     quali_mask   = build_quali_mask(employees, shifts)

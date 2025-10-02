@@ -30,6 +30,7 @@ class HoursConfig(BaseModel):
     min_weekly: float = Field(0, ge=0)
     max_weekly: float = Field(40, ge=0)
     max_daily: float = Field(8, ge=0)
+    max_overtime: float = Field(0, ge=0)
 
     @model_validator(mode="after")
     def check_ranges(cls, values: "HoursConfig") -> "HoursConfig":
@@ -81,6 +82,7 @@ class ShiftsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     demand_mode: str = Field("headcount")
+    coverage_source: str = Field("windows")
 
     @field_validator("demand_mode")
     @classmethod
@@ -89,6 +91,15 @@ class ShiftsConfig(BaseModel):
         value = value.strip().lower()
         if value not in modes:
             raise ValueError(f"demand_mode deve essere uno tra {sorted(modes)}")
+        return value
+
+    @field_validator("coverage_source")
+    @classmethod
+    def validate_coverage_source(cls, value: str) -> str:
+        modes = {"windows", "shifts"}
+        value = value.strip().lower()
+        if value not in modes:
+            raise ValueError(f"coverage_source deve essere uno tra {sorted(modes)}")
         return value
 
 

@@ -150,6 +150,7 @@ def build_solver_from_data(data_dir: Path, cfg: config_loader.Config) -> SimpleN
         objective_priority=objective_priority,
         objective_weights=objective_weights,
         adaptive_slot_data=adaptive_data,
+        global_hours=cfg.hours,
     )
 
     solver.demand_mode = cfg.shifts.demand_mode

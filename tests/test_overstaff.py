@@ -144,6 +144,7 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         objective_priority=objective_priority,
         objective_weights=objective_weights,
         adaptive_slot_data=adaptive_data,
+        global_hours=cfg.hours,
     )
 
     solver.build()
@@ -238,6 +239,7 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         objective_priority=objective_priority,
         objective_weights=objective_weights,
         adaptive_slot_data=adaptive_data,
+        global_hours=cfg.hours,
     )
 
     solver.build()

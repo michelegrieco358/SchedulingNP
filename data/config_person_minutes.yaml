@@ -2,12 +2,13 @@ hours:
   min_weekly: 0
   max_weekly: 40
   max_daily: 8
+  max_overtime: 4
 rest:
   min_between_shifts: 8
 skills:
   enable_slack: true
 shifts:
-  demand_mode: "person_minutes"  # Modalità volume di lavoro
+  demand_mode: "person_minutes"  # ModalitÃ  volume di lavoro
 penalties:
   unmet_window: 2.0
   unmet_demand: 1.0

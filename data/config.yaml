@@ -2,6 +2,7 @@ hours:
   min_weekly: 0
   max_weekly: 40
   max_daily: 8
+  max_overtime: 4
 
 rest:
   min_between_shifts: 8
@@ -26,12 +27,12 @@ penalties:
 
 objective:
   priority:
-  - unmet_window
-  - unmet_demand
-  - unmet_skill
-  - overtime
-  - preferences
-  - fairness
+    - unmet_window
+    - unmet_demand
+    - unmet_skill
+    - overtime
+    - preferences
+    - fairness
 
 random:
   seed: 42

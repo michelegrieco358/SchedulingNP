@@ -96,3 +96,18 @@ def test_solver_objective_priority_respected(tmp_path: Path) -> None:
     breakdown = env.solver.extract_objective_breakdown(env.cp_solver)
     assert set(cfg.objective.priority).issubset(breakdown.keys())
     assert env.solver.objective_priority[0] == "fairness"
+
+
+def test_coverage_source_shifts_uses_shift_requirement(tmp_path: Path) -> None:
+    data_dir = _build_dataset(tmp_path)
+
+    cfg = config_loader.Config()
+    cfg.shifts.coverage_source = "shifts"
+
+    env = build_solver_from_data(data_dir, cfg)
+
+    assert env.solver.using_window_demands is False
+    assert not env.solver.window_demands
+    assert env.solver.shortfall_vars
+    assert env.adaptive_data is None
+
