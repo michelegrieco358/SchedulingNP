@@ -45,18 +45,42 @@ class ObjectiveTerm:
 
 class ScheduleReporter:
     """Generatore di report diagnostici per soluzioni di scheduling."""
-    
-    def __init__(self, solver: Any, cp_solver: cp_model.CpSolver):
+
+    def __init__(
+        self,
+        solver: Any,
+        cp_solver: cp_model.CpSolver,
+        *,
+        assignments_df: Optional[pd.DataFrame] = None,
+        windows_df: Optional[pd.DataFrame] = None,
+    ):
         """Inizializza il reporter.
-        
+
         Args:
             solver: Istanza di ShiftSchedulingCpSolver
             cp_solver: Solver CP-SAT con soluzione
+            assignments_df: Assegnazioni già estratte dal solver (opzionale)
+            windows_df: DataFrame con la domanda aggregata per finestra (opzionale)
         """
         self.solver = solver
         self.cp_solver = cp_solver
         self.output_dir = Path("reports")
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.assignments_df = assignments_df
+        self.windows_df = windows_df
+
+    def update_data(
+        self,
+        *,
+        assignments_df: Optional[pd.DataFrame] = None,
+        windows_df: Optional[pd.DataFrame] = None,
+    ) -> None:
+        """Aggiorna i riferimenti a assignments e windows se disponibili."""
+
+        if assignments_df is not None:
+            self.assignments_df = assignments_df
+        if windows_df is not None:
+            self.windows_df = windows_df
 
     def generate_segment_coverage_report(self) -> pd.DataFrame:
         """Genera report di copertura per segmenti temporali.
@@ -267,103 +291,146 @@ class ScheduleReporter:
             self._plot_coverage(coverage_df)
 
     def _plot_coverage(self, coverage_df: pd.DataFrame) -> None:
-        """Genera un grafico della domanda e copertura per intervallo temporale."""
+        """Genera una heatmap domanda/copertura utilizzando assignments e windows."""
+
+        if self.windows_df is None or getattr(self.windows_df, "empty", True):
+            logger.info("Nessuna windows_df disponibile: salto la generazione della heatmap di copertura")
+            return
+
         try:
+            import numpy as np
             import matplotlib.pyplot as plt
-            import matplotlib.dates as mdates
-            from datetime import datetime, timedelta
-            
-            # Converti orari in datetime per il plot
-            base_date = datetime.now().date()
-            x_times = []
-            for start, end in zip(coverage_df["start_time"], coverage_df["end_time"]):
-                h_start, m_start = map(int, start.split(":"))
-                h_end, m_end = map(int, end.split(":"))
-                x_times.append([
-                    datetime.combine(base_date, datetime.min.time()) + timedelta(hours=h_start, minutes=m_start),
-                    datetime.combine(base_date, datetime.min.time()) + timedelta(hours=h_end, minutes=m_end)
-                ])
-            
-            # Crea figura
-            plt.figure(figsize=(12, 6))
-            
-            demand_label_used = False
-            covered_label_used = False
-            shortfall_label_used = False
-
-            for i in range(len(coverage_df)):
-                segment = coverage_df.iloc[i]
-                start_dt, end_dt = x_times[i]
-                width_hours = (end_dt - start_dt).total_seconds() / 3600
-
-                demand = float(segment["demand"])
-                assigned = float(segment["assigned"])
-
-                covered = min(assigned, demand)
-                shortfall = max(demand - assigned, 0.0)
-                overstaff = max(assigned - demand, 0.0)
-
-                if demand > 0:
-                    plt.bar(
-                        start_dt,
-                        demand,
-                        width=width_hours,
-                        color="lightgray",
-                        alpha=0.5,
-                        edgecolor="none",
-                        label="Domanda" if not demand_label_used else None,
-                    )
-                    demand_label_used = True
-
-                if covered > 0:
-                    plt.bar(
-                        start_dt,
-                        covered,
-                        width=width_hours,
-                        color="tab:green",
-                        alpha=0.8,
-                        edgecolor="none",
-                        label="Coperto" if not covered_label_used else None,
-                    )
-                    covered_label_used = True
-
-                if shortfall > 0:
-                    plt.bar(
-                        start_dt,
-                        shortfall,
-                        width=width_hours,
-                        bottom=covered,
-                        color="tab:red",
-                        alpha=0.8,
-                        edgecolor="none",
-                        label="Scopertura" if not shortfall_label_used else None,
-                    )
-                    shortfall_label_used = True
-
-                # L'overstaffing viene gestito nei report testuali; nel grafico non viene evidenziato
-
-            # Formattazione
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            plt.gca().xaxis.set_major_locator(mdates.HourLocator(interval=2))
-            plt.gcf().autofmt_xdate()
-            
-            plt.title('Domanda vs Copertura per Intervallo')
-            plt.xlabel('Ora')
-            plt.ylabel('Minuti-persona')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # Salva plot
-            plot_path = self.output_dir / "coverage_plot.png"
-            plt.savefig(plot_path)
-            plt.close()
-            
-            logger.info(f"Grafico copertura salvato in {plot_path}")
-            
         except ImportError:
-            logger.warning("matplotlib non installato - impossibile generare il grafico")
-        except Exception as e:
-            logger.error(f"Errore nella generazione del grafico: {e}")
+            logger.warning("matplotlib o numpy non installati - impossibile generare la heatmap")
+            return
+        except Exception as exc:  # pragma: no cover - import dinamico
+            logger.error(f"Errore nell'import dei pacchetti di plotting: {exc}")
+            return
+
+        assignments_df = self.assignments_df
+        if assignments_df is None:
+            try:
+                assignments_df = self.solver.extract_assignments(self.cp_solver)
+                self.assignments_df = assignments_df
+            except Exception as exc:  # pragma: no cover - fallback diagnostico
+                logger.error(f"Impossibile estrarre le assegnazioni dal solver: {exc}")
+                return
+
+        if assignments_df is None or assignments_df.empty:
+            logger.info("Nessuna assegnazione attiva: heatmap di copertura non generata")
+            return
+
+        windows_df = self.windows_df
+        if windows_df is None or windows_df.empty:
+            logger.info("DataFrame windows_df vuoto: heatmap di copertura non generata")
+            return
+
+        slot_minutes = 60
+
+        day_series = windows_df["day"].astype(str)
+        days = sorted(day_series.unique())
+        if not days:
+            logger.info("Nessun giorno presente in windows_df: heatmap di copertura non generata")
+            return
+
+        day_to_col = {day: idx for idx, day in enumerate(days)}
+        n_days = len(days)
+        n_slots = 24 * 60 // slot_minutes
+
+        demand_matrix = np.zeros((n_slots, n_days), dtype=float)
+        coverage_matrix = np.zeros((n_slots, n_days), dtype=float)
+
+        for _, win in windows_df.iterrows():
+            day_label = str(win.get("day", ""))
+            col = day_to_col.get(day_label)
+            if col is None:
+                continue
+
+            start_str = str(win.get("window_start", ""))
+            end_str = str(win.get("window_end", ""))
+            try:
+                start_h, start_m = map(int, start_str.split(":"))
+                end_h, end_m = map(int, end_str.split(":"))
+            except (ValueError, AttributeError):
+                logger.debug("Window %s ha orari non validi (%s-%s)", win.get("window_id"), start_str, end_str)
+                continue
+
+            start_idx = max(0, min(n_slots, (start_h * 60 + start_m) // slot_minutes))
+            end_idx = max(start_idx + 1, min(n_slots, (end_h * 60 + end_m) // slot_minutes))
+
+            demand = win.get("window_demand", 0)
+            try:
+                demand_val = float(demand)
+            except (TypeError, ValueError):
+                demand_val = 0.0
+
+            demand_matrix[start_idx:end_idx, col] += demand_val
+
+        assignments_df_local = assignments_df.copy()
+        if "day" not in assignments_df_local.columns:
+            if "start_dt" in assignments_df_local.columns:
+                assignments_df_local["day"] = (
+                    pd.to_datetime(assignments_df_local["start_dt"], errors="coerce").dt.date.astype(str)
+                )
+            else:
+                assignments_df_local["day"] = ""
+        else:
+            assignments_df_local["day"] = assignments_df_local["day"].astype(str)
+
+        for _, row in assignments_df_local.iterrows():
+            col = day_to_col.get(str(row.get("day", "")))
+            if col is None:
+                continue
+
+            start_dt = pd.to_datetime(row.get("start_dt"), errors="coerce")
+            end_dt = pd.to_datetime(row.get("end_dt"), errors="coerce")
+
+            if pd.isna(start_dt) or pd.isna(end_dt):
+                day_label = row.get("day")
+                start_str = row.get("start") or row.get("start_time")
+                end_str = row.get("end") or row.get("end_time")
+                if day_label and start_str:
+                    start_dt = pd.to_datetime(f"{day_label} {start_str}", errors="coerce")
+                if day_label and end_str:
+                    end_dt = pd.to_datetime(f"{day_label} {end_str}", errors="coerce")
+
+            if pd.isna(start_dt) or pd.isna(end_dt):
+                continue
+
+            start_idx = max(0, min(n_slots, (start_dt.hour * 60 + start_dt.minute) // slot_minutes))
+            end_idx_raw = (end_dt.hour * 60 + end_dt.minute) // slot_minutes
+            end_idx = max(start_idx + 1, min(n_slots, end_idx_raw))
+
+            coverage_matrix[start_idx:end_idx, col] += 1.0
+
+        shortfall_matrix = np.maximum(demand_matrix - coverage_matrix, 0.0)
+
+        fig = plt.figure(figsize=(n_days * 1.5 if n_days else 6, 8))
+        ax = fig.add_subplot(111)
+        heatmap = ax.imshow(shortfall_matrix, aspect="auto", cmap="Reds", origin="lower")
+
+        for col_idx in range(1, n_days):
+            ax.axvline(x=col_idx - 0.5, color="black", linestyle="-", linewidth=2.5, alpha=1.0)
+
+        ax.set_xlabel("Giorno")
+        ax.set_ylabel("Orario")
+        ax.set_xticks(range(n_days))
+        ax.set_xticklabels(days)
+
+        hour_ticks = [i for i in range(n_slots) if (i * slot_minutes) % 60 == 0]
+        hour_labels = [f"{hour:02d}:00" for hour in range(24)]
+        ax.set_yticks(hour_ticks)
+        ax.set_yticklabels(hour_labels)
+
+        ax.set_title("Shortfall di copertura (rosso = scopertura)")
+        fig.colorbar(heatmap, ax=ax, label="Shortfall (persone mancanti)")
+        fig.tight_layout()
+
+        plot_path = self.output_dir / "coverage_plot.png"
+        fig.savefig(plot_path)
+        plt.close(fig)
+
+        logger.info(f"Heatmap copertura salvata in {plot_path}")
 
     def generate_all_reports(self) -> None:
         """Genera tutti i report disponibili."""

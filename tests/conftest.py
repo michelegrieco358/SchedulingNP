@@ -100,6 +100,7 @@ def build_solver_from_data(data_dir: Path, cfg: config_loader.Config) -> SimpleN
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
 
     penalties = {
