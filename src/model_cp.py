@@ -67,6 +67,28 @@ logger = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 
+def _clear_solver_reports(reports_dir: Path | None = None) -> None:
+    """Elimina gli artefatti di report di una run precedente quando la solve fallisce."""
+
+    base_dir = reports_dir or Path("reports")
+    targets = (
+        "coverage_plot.png",
+        "segment_coverage.csv",
+        "constraint_status.csv",
+        "objective_breakdown.csv",
+    )
+
+    for name in targets:
+        path = base_dir / name
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            logger.info("Rimosso artefatto di report obsoleto: %s", path)
+        except OSError as exc:  # pragma: no cover - log diagnostico
+            logger.warning("Impossibile rimuovere il file di report %s: %s", path, exc)
+
+
 def _build_objective_weights(priority: Sequence[str], penalties: Mapping[str, float | int]) -> dict[str, int]:
     weights: dict[str, int] = {}
     for key in priority:
@@ -2697,6 +2719,7 @@ def main(argv: list[str] | None = None) -> int:
     status = cp_solver.StatusName()
     print("Stato solver:", status)
     if status not in {"OPTIMAL", "FEASIBLE"}:
+        _clear_solver_reports()
         return 1
 
     # Generazione report diagnostici tramite ScheduleReporter
