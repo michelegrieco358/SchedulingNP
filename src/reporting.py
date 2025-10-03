@@ -84,59 +84,181 @@ class ScheduleReporter:
             self.windows_df = windows_df
 
     def generate_segment_coverage_report(self) -> pd.DataFrame:
-        """Genera report di copertura per segmenti temporali.
-        
+        """Genera report di copertura per slot temporali aggregati.
+
         Returns:
             DataFrame con colonne: segment_start, segment_end, demand, assigned, shortfall, overstaffing
         """
-        coverages = []
-        
-        # Modalità unica turni integri: usa sempre segment_demands e segment_shortfall_vars
-        if hasattr(self.solver, 'segment_demands') and self.solver.segment_demands:
-            for segment_id, demand in self.solver.segment_demands.items():
-                shortfall = self.cp_solver.Value(self.solver.segment_shortfall_vars[segment_id])
-                assigned = demand - shortfall
-                overstaffing = max(0, assigned - demand)
-                try:
-                    bounds = self.solver.adaptive_slot_data.segment_bounds[segment_id]
-                    if isinstance(bounds, (tuple, list)) and len(bounds) >= 2:
-                        start_min = int(bounds[-2])
-                        end_min = int(bounds[-1])
-                        start_time = f"{start_min // 60:02d}:{start_min % 60:02d}"
-                        end_time = f"{end_min // 60:02d}:{end_min % 60:02d}"
-                    else:
-                        raise KeyError(segment_id)
-                except (AttributeError, KeyError, ValueError, TypeError):
-                    start_time = "??:??"
-                    end_time = "??:??"
-                
-                coverages.append(SegmentCoverage(
-                    segment_id=segment_id,
+        columns = [
+            "segment_id",
+            "start_time",
+            "end_time",
+            "demand",
+            "assigned",
+            "shortfall",
+            "overstaffing",
+        ]
+
+        data = getattr(self.solver, "adaptive_slot_data", None)
+        if not data:
+            df = pd.DataFrame(columns=columns)
+            output_path = self.output_dir / "segment_coverage.csv"
+            df.to_csv(output_path, index=False)
+            logger.info("Report copertura segmenti salvato in %s", output_path)
+            self._print_coverage_summary(df)
+            return df
+
+        slot_bounds = getattr(data, "slot_bounds", {}) or {}
+        if not slot_bounds:
+            df = pd.DataFrame(columns=columns)
+            output_path = self.output_dir / "segment_coverage.csv"
+            df.to_csv(output_path, index=False)
+            logger.info("Report copertura segmenti salvato in %s", output_path)
+            self._print_coverage_summary(df)
+            return df
+
+        slot_windows = getattr(data, "slot_windows", {}) or getattr(self.solver, "slot_windows", {}) or {}
+        cover_map = getattr(data, "cover_segment", {}) or {}
+
+        window_demands = getattr(self.solver, "window_demands", {}) or {}
+        segment_demands = getattr(self.solver, "segment_demands", {}) or {}
+
+        segment_shortfalls: dict[str, float] = {}
+        if hasattr(self.solver, "segment_shortfall_vars") and self.solver.segment_shortfall_vars:
+            segment_shortfalls = {
+                seg_id: float(self.cp_solver.Value(var))
+                for seg_id, var in self.solver.segment_shortfall_vars.items()
+            }
+
+        slot_minutes: dict[str, int] = {}
+        for slot_id, bounds in slot_bounds.items():
+            try:
+                start_min, end_min = int(bounds[0]), int(bounds[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            duration = max(0, end_min - start_min)
+            if duration <= 0:
+                continue
+            slot_minutes[slot_id] = duration
+
+        if not slot_minutes:
+            df = pd.DataFrame(columns=columns)
+            output_path = self.output_dir / "segment_coverage.csv"
+            df.to_csv(output_path, index=False)
+            logger.info("Report copertura segmenti salvato in %s", output_path)
+            self._print_coverage_summary(df)
+            return df
+
+        slots_by_segment: dict[str, list[str]] = {}
+        segments_by_slot: dict[str, list[str]] = {}
+        for (segment_id, slot_id), covers in cover_map.items():
+            if not covers or slot_id not in slot_minutes:
+                continue
+            slots_by_segment.setdefault(segment_id, []).append(slot_id)
+            segments_by_slot.setdefault(slot_id, []).append(segment_id)
+
+        segment_total_minutes: dict[str, int] = {}
+        for segment_id, slots in slots_by_segment.items():
+            total = sum(slot_minutes.get(slot_id, 0) for slot_id in slots)
+            if total > 0:
+                segment_total_minutes[segment_id] = total
+
+        def _format_time(minute: int) -> str:
+            minute = int(minute)
+            if minute < 0:
+                minute = 0
+            minute = minute % (24 * 60)
+            return f"{minute // 60:02d}:{minute % 60:02d}"
+
+        def _slot_sort_key(item: tuple[str, tuple[int, int] | Sequence[int] | Any]) -> tuple[int, int, str]:
+            bounds = item[1]
+            start = 0
+            end = 0
+            try:
+                start = int(bounds[0])
+            except (TypeError, ValueError, IndexError):
+                start = 0
+            try:
+                end = int(bounds[1])
+            except (TypeError, ValueError, IndexError):
+                end = start
+            return (start, end, str(item[0]))
+
+        coverages: list[SegmentCoverage] = []
+        for slot_id, bounds in sorted(slot_bounds.items(), key=_slot_sort_key):
+            if slot_id not in slot_minutes:
+                continue
+            start_min, end_min = bounds
+            duration = slot_minutes[slot_id]
+            start_time = _format_time(start_min)
+            end_time = _format_time(end_min)
+
+            demand_from_windows = 0.0
+            for window_info in slot_windows.get(slot_id, []):
+                if isinstance(window_info, tuple):
+                    window_id, overlap = window_info
+                    overlap_minutes = max(0, int(overlap))
+                else:
+                    window_id = window_info
+                    overlap_minutes = duration
+                demand = window_demands.get(str(window_id), 0)
+                if demand <= 0 or overlap_minutes <= 0:
+                    continue
+                demand_from_windows += demand * overlap_minutes
+
+            assigned_sum = 0.0
+            shortfall_sum = 0.0
+            demand_from_segments = 0.0
+
+            covering_segments = segments_by_slot.get(slot_id, [])
+
+            for segment_id in covering_segments:
+                total_minutes = segment_total_minutes.get(segment_id, 0)
+                if total_minutes <= 0:
+                    continue
+                seg_demand = float(segment_demands.get(segment_id, 0))
+                seg_shortfall = float(segment_shortfalls.get(segment_id, 0))
+                if seg_demand <= 0 and seg_shortfall <= 0:
+                    continue
+                share = duration / total_minutes
+                demand_contrib = seg_demand * share
+                shortfall_contrib = seg_shortfall * share
+                assigned_contrib = max(0.0, demand_contrib - shortfall_contrib)
+
+                demand_from_segments += demand_contrib
+                shortfall_sum += shortfall_contrib
+                assigned_sum += assigned_contrib
+
+            if demand_from_windows <= 0 and demand_from_segments > 0:
+                demand_value = demand_from_segments
+            else:
+                demand_value = demand_from_windows
+
+            demand_int = int(round(demand_value)) if demand_value > 0 else 0
+            assigned_int = int(round(assigned_sum)) if assigned_sum > 0 else 0
+            shortfall_int = int(round(shortfall_sum)) if shortfall_sum > 0 else 0
+            overstaffing = max(0, assigned_int - demand_int)
+
+            coverages.append(
+                SegmentCoverage(
+                    segment_id=slot_id,
                     start_time=start_time,
                     end_time=end_time,
-                    demand=demand,
-                    assigned=assigned,
-                    shortfall=shortfall,
-                    overstaffing=overstaffing
-                ))
-        # Modalità slot adattivi rimossa - ora usa solo segment_shortfall_vars
-        
-        # Converti in DataFrame
-        columns = ["segment_id", "start_time", "end_time", "demand", "assigned", "shortfall", "overstaffing"]
-        if coverages:
-            df = pd.DataFrame([vars(c) for c in coverages])
+                    demand=demand_int,
+                    assigned=assigned_int,
+                    shortfall=shortfall_int,
+                    overstaffing=overstaffing,
+                )
+            )
+
+        df = pd.DataFrame([vars(c) for c in coverages]) if coverages else pd.DataFrame(columns=columns)
+        if not df.empty:
             df = df[columns]
-        else:
-            df = pd.DataFrame(columns=columns)
-        
-        # Salva su file
+
         output_path = self.output_dir / "segment_coverage.csv"
         df.to_csv(output_path, index=False)
-        logger.info(f"Report copertura segmenti salvato in {output_path}")
-        
-        # Stampa sommario su console
+        logger.info("Report copertura segmenti salvato in %s", output_path)
         self._print_coverage_summary(df)
-        
         return df
 
     def generate_constraint_report(self) -> pd.DataFrame:
