@@ -1637,8 +1637,58 @@ class ShiftSchedulingCpSolver:
 
     def extract_shortfall_summary(self, solver: cp_model.CpSolver) -> pd.DataFrame:
         """Riepiloga la scopertura residua per ciascun turno."""
+        columns = ["shift_id", "shortfall_units", "shortfall_staff_minutes"]
+
+        slot_shortfall_vars = getattr(self, "slot_shortfall_vars", None) or {}
+        if slot_shortfall_vars:
+            segment_owner: dict[str, str] = {}
+            if self.adaptive_slot_data is not None:
+                segment_owner = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+            if not segment_owner and getattr(self, "shift_to_covering_segments", None):
+                for shift_id, segments in self.shift_to_covering_segments.items():
+                    for segment_id in segments:
+                        segment_owner.setdefault(segment_id, shift_id)
+
+            totals: dict[str, int] = {}
+            for slot_id, var in slot_shortfall_vars.items():
+                units = int(solver.Value(var))
+                if units <= 0:
+                    continue
+
+                owner_shift = segment_owner.get(slot_id)
+                if owner_shift is None and isinstance(slot_id, str) and "__" in slot_id:
+                    owner_shift = slot_id.split("__", 1)[0]
+                if owner_shift is None:
+                    owner_shift = str(slot_id)
+
+                shift_key = str(owner_shift)
+                totals[shift_key] = totals.get(shift_key, 0) + units
+
+            if not totals:
+                return pd.DataFrame(columns=columns)
+
+            rows = []
+            for shift_id, total_units in totals.items():
+                if total_units <= 0:
+                    continue
+                duration = self.duration_minutes.get(shift_id)
+                if duration is None:
+                    duration = self.duration_minutes.get(str(shift_id), 0)
+                rows.append(
+                    {
+                        "shift_id": shift_id,
+                        "shortfall_units": total_units,
+                        "shortfall_staff_minutes": total_units * (duration or 0),
+                    }
+                )
+
+            if not rows:
+                return pd.DataFrame(columns=columns)
+
+            return pd.DataFrame(rows, columns=columns)
+
         if not self.shortfall_vars:
-            return pd.DataFrame(columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
+            return pd.DataFrame(columns=columns)
 
         rows = []
         for shift_id, var in self.shortfall_vars.items():
@@ -1651,9 +1701,9 @@ class ShiftSchedulingCpSolver:
             )
 
         if not rows:
-            return pd.DataFrame(columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
+            return pd.DataFrame(columns=columns)
 
-        return pd.DataFrame(rows, columns=["shift_id", "shortfall_units", "shortfall_staff_minutes"])
+        return pd.DataFrame(rows, columns=columns)
 
     def extract_preference_summary(self, solver: cp_model.CpSolver) -> pd.DataFrame:
         """Riepiloga l'applicazione delle preferenze per dipendente."""
