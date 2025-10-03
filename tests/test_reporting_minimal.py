@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -114,3 +115,55 @@ def test_plot_coverage_accepts_time_objects(tmp_path, monkeypatch):
     plot_path = reporter.output_dir / "coverage_plot.png"
     assert plot_path.exists()
     assert plot_path.stat().st_size > 0
+
+
+class DummyCpSolver:
+    def __init__(self, values):
+        self._values = values
+
+    def Value(self, var):
+        return self._values.get(var, 0)
+
+
+def test_constraint_report_prefers_slot_shortfalls(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    slot_var_a = object()
+    slot_var_b = object()
+    legacy_var = object()
+    slot_skill_var = object()
+    legacy_skill_var = object()
+
+    solver = SimpleNamespace(
+        shortfall_vars={"legacy": legacy_var},
+        slot_shortfall_vars={"slot-a": slot_var_a, "slot-b": slot_var_b},
+        rest_violations={},
+        skill_shortfall_vars={("legacy", "skill") : legacy_skill_var},
+        slot_skill_shortfall_vars={("slot", "skill") : slot_skill_var},
+    )
+
+    cp_solver = DummyCpSolver(
+        {
+            slot_var_a: 2,
+            slot_var_b: 3,
+            legacy_var: 99,
+            slot_skill_var: 4,
+            legacy_skill_var: 42,
+        }
+    )
+
+    reporter = reporting.ScheduleReporter(solver, cp_solver)
+    df = reporter.generate_constraint_report()
+
+    coverage_row = df[df["name"] == "coverage_constraints"].iloc[0]
+    assert coverage_row["violation"] == pytest.approx(5)
+
+    skill_row = df[df["name"] == "skill_constraints"].iloc[0]
+    assert skill_row["violation"] == pytest.approx(4)
+
+    csv_df = pd.read_csv(reporter.output_dir / "constraint_status.csv")
+    csv_coverage = csv_df[csv_df["name"] == "coverage_constraints"].iloc[0]
+    assert csv_coverage["violation"] == pytest.approx(5)
+
+    csv_skill = csv_df[csv_df["name"] == "skill_constraints"].iloc[0]
+    assert csv_skill["violation"] == pytest.approx(4)
