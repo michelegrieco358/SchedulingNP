@@ -21,6 +21,7 @@ penalties:
   preferences: 0.33
   fairness: 0.05
 objective:
+  mode: weighted       # "weighted" | "lex"
   priority:
     - unmet_window
     - unmet_demand
