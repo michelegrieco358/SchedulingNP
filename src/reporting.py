@@ -5,6 +5,7 @@ e generare report dettagliati sulla copertura, i vincoli e l'obiettivo.
 """
 from pathlib import Path
 import logging
+import datetime as dt
 from typing import Dict, Any, Mapping, Sequence, Optional
 from dataclasses import dataclass
 import pandas as pd
@@ -340,23 +341,78 @@ class ScheduleReporter:
         demand_matrix = np.zeros((n_slots, n_days), dtype=float)
         coverage_matrix = np.zeros((n_slots, n_days), dtype=float)
 
+        def _coerce_minute_value(value: Any) -> Optional[int]:
+            """Return an integer minute offset when possible."""
+
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except TypeError:
+                # Non-scalar values fall through to conversion attempt.
+                pass
+
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _parse_time_like(value: Any) -> Optional[int]:
+            """Parse datetime/time or HH:MM strings into minutes from midnight."""
+
+            if value is None:
+                return None
+
+            if isinstance(value, dt.datetime):
+                return value.hour * 60 + value.minute
+
+            if isinstance(value, dt.time):
+                return value.hour * 60 + value.minute
+
+            if isinstance(value, pd.Timestamp):
+                if pd.isna(value):
+                    return None
+                return value.hour * 60 + value.minute
+
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                try:
+                    hour_str, minute_str = text.split(":", 1)
+                    return int(hour_str) * 60 + int(minute_str)
+                except (ValueError, AttributeError):
+                    return None
+
+            return None
+
         for _, win in windows_df.iterrows():
             day_label = str(win.get("day", ""))
             col = day_to_col.get(day_label)
             if col is None:
                 continue
 
-            start_str = str(win.get("window_start", ""))
-            end_str = str(win.get("window_end", ""))
-            try:
-                start_h, start_m = map(int, start_str.split(":"))
-                end_h, end_m = map(int, end_str.split(":"))
-            except (ValueError, AttributeError):
-                logger.debug("Window %s ha orari non validi (%s-%s)", win.get("window_id"), start_str, end_str)
+            start_minute = _coerce_minute_value(win.get("window_start_min"))
+            end_minute = _coerce_minute_value(win.get("window_end_min"))
+
+            if start_minute is None or end_minute is None:
+                start_minute = _parse_time_like(win.get("window_start"))
+                end_minute = _parse_time_like(win.get("window_end"))
+
+            if start_minute is None or end_minute is None:
+                start_repr = win.get("window_start")
+                end_repr = win.get("window_end")
+                logger.debug(
+                    "Window %s ha orari non validi (%s-%s)",
+                    win.get("window_id"),
+                    start_repr,
+                    end_repr,
+                )
                 continue
 
-            start_idx = max(0, min(n_slots, (start_h * 60 + start_m) // slot_minutes))
-            end_idx = max(start_idx + 1, min(n_slots, (end_h * 60 + end_m) // slot_minutes))
+            start_idx = max(0, min(n_slots, start_minute // slot_minutes))
+            end_idx = max(start_idx + 1, min(n_slots, end_minute // slot_minutes))
 
             demand = win.get("window_demand", 0)
             try:
