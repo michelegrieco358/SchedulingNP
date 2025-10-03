@@ -838,7 +838,7 @@ class ShiftSchedulingCpSolver:
         """Ottiene la durata di un segmento in minuti."""
         if not self.adaptive_slot_data:
             return self.avg_shift_minutes  # Fallback
-            
+
         try:
             segment_bounds = getattr(self.adaptive_slot_data, 'segment_bounds', {})
             if segment_id in segment_bounds:
@@ -846,8 +846,51 @@ class ShiftSchedulingCpSolver:
                 return max(1, int(end_min - start_min))
         except (AttributeError, ValueError):
             pass
-            
+
         return self.avg_shift_minutes  # Fallback
+
+
+    def _get_slot_duration_minutes(self, slot_id: str) -> int:
+        """Restituisce la durata di uno slot in minuti con fallback conservativi."""
+        slot_key = str(slot_id)
+        duration: int | None = None
+
+        adaptive_data = getattr(self, "adaptive_slot_data", None)
+        if adaptive_data is not None:
+            try:
+                slot_minutes = getattr(adaptive_data, "slot_minutes", {}) or {}
+                raw = slot_minutes.get(slot_key)
+                if raw is not None:
+                    duration = int(raw)
+            except (AttributeError, TypeError, ValueError):
+                duration = None
+
+            if duration is None:
+                try:
+                    slot_bounds = getattr(adaptive_data, "slot_bounds", {}) or {}
+                    bounds = slot_bounds.get(slot_key)
+                    if bounds is not None and len(bounds) >= 2:
+                        start_min = int(bounds[0])
+                        end_min = int(bounds[1])
+                        duration = end_min - start_min
+                except (AttributeError, TypeError, ValueError):
+                    duration = None
+
+        if duration is None or duration <= 0:
+            if "__" in slot_key and "_" in slot_key:
+                try:
+                    tail = slot_key.rsplit("__", 1)[-1]
+                    start_str, end_str = tail.split("_", 1)
+                    inferred = int(end_str) - int(start_str)
+                    if inferred > 0:
+                        duration = inferred
+                except (ValueError, TypeError):
+                    duration = None
+
+        if duration is None or duration <= 0:
+            return self.avg_shift_minutes
+
+        return max(1, int(duration))
 
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
@@ -1908,20 +1951,42 @@ class ShiftSchedulingCpSolver:
         # 1. Finestre (modalitÃƒÂ  unica segmenti)
         window_minutes = 0
         window_cost = 0.0
-        if hasattr(self, 'segment_shortfall_vars') and self.segment_shortfall_vars:
-            weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
+        window_weight = self.objective_weights_minutes.get("unmet_window", 0.0)
+
+        slot_shortfall_vars = getattr(self, "slot_shortfall_vars", None) or {}
+        if slot_shortfall_vars:
+            for slot_id, var in slot_shortfall_vars.items():
+                shortfall_units = solver.Value(var)
+                if shortfall_units <= 0:
+                    continue
+                slot_duration = self._get_slot_duration_minutes(slot_id)
+                minutes = shortfall_units * slot_duration
+                window_minutes += minutes
+                window_cost += minutes * window_weight
+        elif hasattr(self, 'segment_shortfall_vars') and self.segment_shortfall_vars:
             for segment_id, var in self.segment_shortfall_vars.items():
                 shortfall_units = solver.Value(var)
-                if shortfall_units > 0:
-                    segment_duration = self._get_segment_duration_minutes(segment_id)
-                    minutes = shortfall_units * segment_duration
-                    window_minutes += minutes
-                    window_cost += minutes * weight_per_min
-        
+                if shortfall_units <= 0:
+                    continue
+                segment_duration = self._get_segment_duration_minutes(segment_id)
+                minutes = shortfall_units * segment_duration
+                window_minutes += minutes
+                window_cost += minutes * window_weight
+        else:
+            window_shortfall_vars = getattr(self, "window_shortfall_vars", None) or {}
+            for window_id, var in window_shortfall_vars.items():
+                shortfall_units = solver.Value(var)
+                if shortfall_units <= 0:
+                    continue
+                duration = self.window_duration_minutes.get(window_id, self.avg_shift_minutes)
+                minutes = shortfall_units * max(1, int(duration))
+                window_minutes += minutes
+                window_cost += minutes * window_weight
+
         breakdown["unmet_window"] = {
             "minutes": window_minutes,
             "cost": window_cost,
-            "weight_per_min": self.objective_weights_minutes.get("unmet_window", 0.0)
+            "weight_per_min": window_weight
         }
         
         # 2. Turni (shortfall hard)
@@ -1945,19 +2010,32 @@ class ShiftSchedulingCpSolver:
         # 3. Skill shortfall
         skill_minutes = 0
         skill_cost = 0.0
-        weight_per_min = self.objective_weights_minutes.get("unmet_skill", 0.0)
-        for (shift_id, skill_name), var in self.skill_shortfall_vars.items():
-            shortfall_units = solver.Value(var)
-            if shortfall_units > 0:
+        skill_weight = self.objective_weights_minutes.get("unmet_skill", 0.0)
+
+        slot_skill_shortfall_vars = getattr(self, "slot_skill_shortfall_vars", None) or {}
+        if slot_skill_shortfall_vars:
+            for (slot_id, _skill_name), var in slot_skill_shortfall_vars.items():
+                shortfall_units = solver.Value(var)
+                if shortfall_units <= 0:
+                    continue
+                slot_duration = self._get_slot_duration_minutes(slot_id)
+                minutes = shortfall_units * slot_duration
+                skill_minutes += minutes
+                skill_cost += minutes * skill_weight
+        else:
+            for (shift_id, skill_name), var in self.skill_shortfall_vars.items():
+                shortfall_units = solver.Value(var)
+                if shortfall_units <= 0:
+                    continue
                 shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
                 minutes = shortfall_units * shift_duration
                 skill_minutes += minutes
-                skill_cost += minutes * weight_per_min
-        
+                skill_cost += minutes * skill_weight
+
         breakdown["unmet_skill"] = {
             "minutes": skill_minutes,
             "cost": skill_cost,
-            "weight_per_min": weight_per_min
+            "weight_per_min": skill_weight
         }
         
         # 4. Utilizzo risorse esterne
