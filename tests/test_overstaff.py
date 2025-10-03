@@ -127,6 +127,7 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(
@@ -223,6 +224,7 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(

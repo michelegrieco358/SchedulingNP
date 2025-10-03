@@ -119,7 +119,20 @@ class PenaltiesConfig(BaseModel):
 class ObjectiveConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Modalità di combinazione degli obiettivi:
+    # - "weighted": somma pesata (comportamento attuale)
+    # - "lex": ottimizzazione lessicografica pura
+    mode: str = Field("weighted")
     priority: list[str] = Field(default_factory=lambda: list(PRIORITY_KEYS))
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        value = value.strip().lower()
+        allowed = {"weighted", "lex"}
+        if value not in allowed:
+            raise ValueError(f"objective.mode deve essere uno tra {sorted(allowed)}")
+        return value
 
     @field_validator("priority")
     @classmethod

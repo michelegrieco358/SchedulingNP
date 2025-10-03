@@ -35,3 +35,11 @@ def test_load_config_custom(tmp_path: Path) -> None:
     assert cfg.rest.min_between_shifts == 10
     assert cfg.skills.enable_slack is False
     assert cfg.logging.level == "DEBUG"
+
+
+def test_objective_mode_validation() -> None:
+    cfg = config_loader.ObjectiveConfig()
+    assert cfg.mode == "weighted"
+    assert config_loader.ObjectiveConfig(mode="LEX").mode == "lex"
+    with pytest.raises(ValueError):
+        config_loader.ObjectiveConfig(mode="invalid")
