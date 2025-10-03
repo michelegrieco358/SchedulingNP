@@ -1730,6 +1730,61 @@ class ShiftSchedulingCpSolver:
 
             return pd.DataFrame(rows, columns=columns)
 
+        segment_shortfall_vars = getattr(self, "segment_shortfall_vars", None) or {}
+        if segment_shortfall_vars:
+            segment_owner: dict[str, str] = {}
+            if self.adaptive_slot_data is not None:
+                segment_owner = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+            if not segment_owner and getattr(self, "shift_to_covering_segments", None):
+                for shift_id, segments in self.shift_to_covering_segments.items():
+                    for segment_id in segments:
+                        segment_owner.setdefault(segment_id, shift_id)
+
+            totals_minutes: dict[str, int] = {}
+            totals_units: dict[str, float] = {}
+            for segment_id, var in segment_shortfall_vars.items():
+                minutes = int(solver.Value(var))
+                if minutes <= 0:
+                    continue
+
+                owner_shift: str | None = segment_owner.get(segment_id)
+                if owner_shift is None and getattr(self, "shift_to_covering_segments", None):
+                    for shift_id, segments in self.shift_to_covering_segments.items():
+                        if segment_id in segments:
+                            owner_shift = shift_id
+                            segment_owner.setdefault(segment_id, shift_id)
+                            break
+                if owner_shift is None and isinstance(segment_id, str) and "__" in segment_id:
+                    owner_shift = segment_id.split("__", 1)[0]
+                if owner_shift is None:
+                    owner_shift = str(segment_id)
+
+                segment_duration = max(1, int(self._get_segment_duration_minutes(str(segment_id))))
+                shift_key = str(owner_shift)
+                totals_minutes[shift_key] = totals_minutes.get(shift_key, 0) + minutes
+                totals_units[shift_key] = totals_units.get(shift_key, 0.0) + (minutes / segment_duration)
+
+            if not totals_minutes:
+                return pd.DataFrame(columns=columns)
+
+            rows = []
+            for shift_id, total_minutes in totals_minutes.items():
+                if total_minutes <= 0:
+                    continue
+                approx_units = totals_units.get(shift_id, 0.0)
+                rows.append(
+                    {
+                        "shift_id": shift_id,
+                        "shortfall_units": int(round(approx_units)),
+                        "shortfall_staff_minutes": int(total_minutes),
+                    }
+                )
+
+            if not rows:
+                return pd.DataFrame(columns=columns)
+
+            return pd.DataFrame(rows, columns=columns)
+
         if not self.shortfall_vars:
             return pd.DataFrame(columns=columns)
 

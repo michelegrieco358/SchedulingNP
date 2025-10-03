@@ -167,6 +167,64 @@ def test_extract_shortfall_summary_prefers_slot_vars(sample_environment, tmp_pat
     pd.testing.assert_frame_equal(saved_df, shortfall_df)
 
 
+def test_extract_shortfall_summary_falls_back_to_segments(sample_environment, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    solver = sample_environment.solver
+
+    solver.slot_shortfall_vars = {}
+    solver.shortfall_vars = {}
+
+    assert solver.segment_shortfall_vars, "expected segment shortfall variables"
+    assert solver.shift_to_covering_segments, "expected mapping shift -> segments"
+
+    shift_id, segments = next(iter(solver.shift_to_covering_segments.items()))
+    assert segments, "expected at least one segment for the shift"
+
+    # Select up to two segments for aggregation checks
+    segment_ids = segments[:2]
+
+    overrides = {}
+    expected_minutes = 0
+    expected_units = 0.0
+
+    for idx, segment_id in enumerate(segment_ids):
+        var = solver.segment_shortfall_vars.get(segment_id)
+        if var is None:
+            continue
+        minutes = 15 + idx * 10
+        overrides[var] = minutes
+        expected_minutes += minutes
+        segment_duration = max(1, solver._get_segment_duration_minutes(segment_id))
+        expected_units += minutes / segment_duration
+
+        if hasattr(solver, "adaptive_slot_data") and solver.adaptive_slot_data is not None:
+            segment_owner = getattr(solver.adaptive_slot_data, "segment_owner", None)
+            if segment_owner is None:
+                segment_owner = {}
+                setattr(solver.adaptive_slot_data, "segment_owner", segment_owner)
+            segment_owner[segment_id] = shift_id
+
+    assert overrides, "expected at least one overridden segment shortfall"
+
+    cp_solver = DelegatingCpSolver(sample_environment.cp_solver, overrides)
+
+    shortfall_df = solver.extract_shortfall_summary(cp_solver)
+    assert not shortfall_df.empty
+
+    row = shortfall_df.loc[shortfall_df["shift_id"] == shift_id].iloc[0]
+    assert row["shortfall_staff_minutes"] == expected_minutes
+    assert row["shortfall_units"] == int(round(expected_units))
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "shortfall_report.csv"
+    shortfall_df.to_csv(output_path, index=False)
+    assert output_path.exists()
+    saved_df = pd.read_csv(output_path)
+    pd.testing.assert_frame_equal(saved_df, shortfall_df)
+
+
 def test_constraint_report_prefers_slot_shortfalls(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
