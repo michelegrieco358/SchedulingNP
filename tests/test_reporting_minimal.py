@@ -382,3 +382,64 @@ def test_skill_coverage_report_uses_slot_shortfalls(sample_environment, tmp_path
     ]
     assert not saved_row.empty
     assert saved_row.iloc[0]["shortfall"] == 3
+
+
+def test_skill_coverage_report_uses_segment_shortfalls(sample_environment, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    solver = sample_environment.solver
+
+    assert not solver.shifts.empty, "expected at least one shift"
+    shift_id = solver.shifts.iloc[0]["shift_id"]
+    shift_id_str = str(shift_id)
+
+    assert solver.emp_skills, "expected employee skills"
+    first_skill_set = next(iter(solver.emp_skills.values()))
+    assert first_skill_set, "expected at least one skill"
+    skill_name = str(next(iter(first_skill_set)))
+
+    solver.shift_skill_requirements = {shift_id_str: {skill_name: 1}}
+    solver.slot_skill_shortfall_vars = {}
+    solver.skill_shortfall_vars = {}
+
+    segments = solver.shift_to_covering_segments.get(shift_id_str, [])
+    assert segments, "expected at least one covering segment"
+    segment_id = segments[0]
+
+    segment_var = object()
+    solver.segment_skill_shortfall_vars = {(segment_id, skill_name): segment_var}
+
+    if hasattr(solver, "adaptive_slot_data") and solver.adaptive_slot_data is not None:
+        segment_owner = getattr(solver.adaptive_slot_data, "segment_owner", None)
+        if segment_owner is None:
+            segment_owner = {}
+            setattr(solver.adaptive_slot_data, "segment_owner", segment_owner)
+        segment_owner[segment_id] = shift_id_str
+
+    shift_duration = max(1, int(solver.duration_minutes.get(shift_id_str, 0) or 0))
+    overrides = {segment_var: shift_duration}
+
+    cp_solver = DelegatingCpSolver(sample_environment.cp_solver, overrides)
+
+    coverage_df = solver.extract_skill_coverage_summary(cp_solver)
+    assert not coverage_df.empty
+
+    row = coverage_df[
+        (coverage_df["shift_id"] == shift_id_str) & (coverage_df["skill"] == skill_name)
+    ]
+    assert not row.empty
+
+    expected_shortfall = 1
+    assert row.iloc[0]["shortfall"] == expected_shortfall
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "skill_coverage_report.csv"
+    coverage_df.to_csv(output_path, index=False)
+
+    saved_df = pd.read_csv(output_path)
+    saved_row = saved_df[
+        (saved_df["shift_id"] == shift_id_str) & (saved_df["skill"] == skill_name)
+    ]
+    assert not saved_row.empty
+    assert saved_row.iloc[0]["shortfall"] == expected_shortfall
