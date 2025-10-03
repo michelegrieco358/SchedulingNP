@@ -125,6 +125,17 @@ class DummyCpSolver:
         return self._values.get(var, 0)
 
 
+class DelegatingCpSolver:
+    def __init__(self, base_solver, overrides):
+        self._base_solver = base_solver
+        self._overrides = overrides
+
+    def Value(self, var):
+        if var in self._overrides:
+            return self._overrides[var]
+        return self._base_solver.Value(var)
+
+
 def test_extract_shortfall_summary_prefers_slot_vars(sample_environment, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
@@ -217,6 +228,57 @@ def test_constraint_report_prefers_slot_shortfalls(tmp_path, monkeypatch):
     csv_skill = csv_df[csv_df["name"] == "skill_constraints"].iloc[0]
     assert csv_skill["violation"] == pytest.approx(4)
 
+
+def test_objective_breakdown_uses_slot_shortfalls(sample_environment):
+    solver = sample_environment.solver
+    base_solver = sample_environment.cp_solver
+
+    baseline = solver.extract_objective_breakdown(base_solver)
+    base_window_minutes = baseline["unmet_window"].get("minutes", 0)
+    base_skill_minutes = baseline["unmet_skill"].get("minutes", 0)
+
+    adaptive_data = getattr(solver, "adaptive_slot_data", None)
+    slot_minutes = getattr(adaptive_data, "slot_minutes", {}) if adaptive_data is not None else {}
+    assert slot_minutes, "expected slot minutes in adaptive data"
+
+    slot_id, slot_duration = next(iter(slot_minutes.items()))
+
+    slot_var = object()
+    slot_skill_var = object()
+
+    had_slot_attr = hasattr(solver, "slot_shortfall_vars")
+    had_slot_skill_attr = hasattr(solver, "slot_skill_shortfall_vars")
+    original_slot_vars = getattr(solver, "slot_shortfall_vars", None)
+    original_slot_skill_vars = getattr(solver, "slot_skill_shortfall_vars", None)
+
+    try:
+        solver.slot_shortfall_vars = {slot_id: slot_var}
+        solver.slot_skill_shortfall_vars = {(slot_id, "skillA"): slot_skill_var}
+
+        overrides = {slot_var: 2, slot_skill_var: 3}
+        cp_solver = DelegatingCpSolver(base_solver, overrides)
+
+        updated = solver.extract_objective_breakdown(cp_solver)
+
+        expected_window_minutes = base_window_minutes + overrides[slot_var] * slot_duration
+        assert updated["unmet_window"]["minutes"] == expected_window_minutes
+        expected_window_cost = expected_window_minutes * solver.objective_weights_minutes.get("unmet_window", 0.0)
+        assert updated["unmet_window"]["cost"] == pytest.approx(expected_window_cost)
+
+        expected_skill_minutes = base_skill_minutes + overrides[slot_skill_var] * slot_duration
+        assert updated["unmet_skill"]["minutes"] == expected_skill_minutes
+        expected_skill_cost = expected_skill_minutes * solver.objective_weights_minutes.get("unmet_skill", 0.0)
+        assert updated["unmet_skill"]["cost"] == pytest.approx(expected_skill_cost)
+    finally:
+        if had_slot_attr:
+            solver.slot_shortfall_vars = original_slot_vars
+        elif hasattr(solver, "slot_shortfall_vars"):
+            delattr(solver, "slot_shortfall_vars")
+
+        if had_slot_skill_attr:
+            solver.slot_skill_shortfall_vars = original_slot_skill_vars
+        elif hasattr(solver, "slot_skill_shortfall_vars"):
+            delattr(solver, "slot_skill_shortfall_vars")
 
 def test_skill_coverage_report_uses_slot_shortfalls(sample_environment, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
