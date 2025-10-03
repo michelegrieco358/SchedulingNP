@@ -1847,25 +1847,49 @@ class ShiftSchedulingCpSolver:
         if not self.shift_skill_requirements:
             return pd.DataFrame(columns=columns)
 
+        segment_skill_shortfall_vars = getattr(self, "segment_skill_shortfall_vars", None) or {}
         slot_skill_shortfall_vars = getattr(self, "slot_skill_shortfall_vars", None) or {}
-        use_slot_shortfalls = bool(slot_skill_shortfall_vars)
-        slot_shortfall_totals: dict[tuple[str, str], int] = {}
 
-        if use_slot_shortfalls:
-            segment_owner: dict[str, str] = {}
+        segment_shortfall_minutes: dict[tuple[str, str], int] = {}
+        if segment_skill_shortfall_vars:
+            owner_map: dict[str, str] = {}
             if self.adaptive_slot_data is not None:
-                segment_owner = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
-            if not segment_owner and getattr(self, "shift_to_covering_segments", None):
+                owner_map = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+            if not owner_map and getattr(self, "shift_to_covering_segments", None):
                 for shift_key, segments in self.shift_to_covering_segments.items():
                     for segment_id in segments:
-                        segment_owner.setdefault(segment_id, shift_key)
+                        owner_map.setdefault(segment_id, shift_key)
+
+            for (segment_id, skill_name), var in segment_skill_shortfall_vars.items():
+                minutes = int(solver.Value(var))
+                if minutes <= 0:
+                    continue
+
+                owner_shift = owner_map.get(segment_id)
+                if owner_shift is None and isinstance(segment_id, str) and "__" in segment_id:
+                    owner_shift = segment_id.split("__", 1)[0]
+                if owner_shift is None:
+                    owner_shift = str(segment_id)
+
+                key = (str(owner_shift), str(skill_name))
+                segment_shortfall_minutes[key] = segment_shortfall_minutes.get(key, 0) + minutes
+
+        slot_shortfall_totals: dict[tuple[str, str], int] = {}
+        if slot_skill_shortfall_vars:
+            owner_map: dict[str, str] = {}
+            if self.adaptive_slot_data is not None:
+                owner_map = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+            if not owner_map and getattr(self, "shift_to_covering_segments", None):
+                for shift_key, segments in self.shift_to_covering_segments.items():
+                    for segment_id in segments:
+                        owner_map.setdefault(segment_id, shift_key)
 
             for (slot_id, skill_name), var in slot_skill_shortfall_vars.items():
                 units = int(solver.Value(var))
                 if units <= 0:
                     continue
 
-                owner_shift = segment_owner.get(slot_id)
+                owner_shift = owner_map.get(slot_id)
                 if owner_shift is None and isinstance(slot_id, str) and "__" in slot_id:
                     owner_shift = slot_id.split("__", 1)[0]
                 if owner_shift is None:
@@ -1873,6 +1897,8 @@ class ShiftSchedulingCpSolver:
 
                 key = (str(owner_shift), str(skill_name))
                 slot_shortfall_totals[key] = slot_shortfall_totals.get(key, 0) + units
+
+        skill_shortfall_vars = getattr(self, "skill_shortfall_vars", None) or {}
 
         rows = []
         for shift_id, requirements in self.shift_skill_requirements.items():
@@ -1885,12 +1911,33 @@ class ShiftSchedulingCpSolver:
                     if skill_name in self.emp_skills.get(emp_id, set()):
                         covered += int(solver.Value(var))
 
-                if use_slot_shortfalls:
-                    shortfall = slot_shortfall_totals.get((str(shift_id), str(skill_name)), 0)
+                shift_key = str(shift_id)
+                skill_key = str(skill_name)
+                dict_key = (shift_key, skill_key)
+
+                shortfall = 0
+                if dict_key in segment_shortfall_minutes:
+                    total_minutes = segment_shortfall_minutes[dict_key]
+                    duration = self.duration_minutes.get(shift_id)
+                    if duration is None:
+                        duration = self.duration_minutes.get(shift_key)
+                    if duration is None:
+                        duration = 0
+                    duration_int = max(1, int(duration))
+                    if total_minutes > 0:
+                        shortfall = int(math.ceil(total_minutes / duration_int))
+                elif dict_key in slot_shortfall_totals:
+                    shortfall = slot_shortfall_totals[dict_key]
                 else:
-                    shortfall = 0
-                    if (shift_id, skill_name) in self.skill_shortfall_vars:
-                        shortfall = int(solver.Value(self.skill_shortfall_vars[(shift_id, skill_name)]))
+                    fallback_var = skill_shortfall_vars.get((shift_id, skill_name))
+                    if fallback_var is None and (shift_id, skill_name) != dict_key:
+                        fallback_var = skill_shortfall_vars.get(dict_key)
+                    if fallback_var is None and (shift_id, skill_name) != (shift_key, skill_name):
+                        fallback_var = skill_shortfall_vars.get((shift_key, skill_name))
+                    if fallback_var is None and (shift_id, skill_name) != (shift_id, skill_key):
+                        fallback_var = skill_shortfall_vars.get((shift_id, skill_key))
+                    if fallback_var is not None:
+                        shortfall = int(solver.Value(fallback_var))
 
                 rows.append(
                     {
