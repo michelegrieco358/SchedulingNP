@@ -270,8 +270,13 @@ class ScheduleReporter:
         statuses = []
         
         # Verifica vincoli di assegnazione
-        if self.solver.shortfall_vars:
-            total_shortfall = sum(self.cp_solver.Value(var) for var in self.solver.shortfall_vars.values())
+        slot_shortfall_vars = getattr(self.solver, "slot_shortfall_vars", None) or {}
+        legacy_shortfall_vars = getattr(self.solver, "shortfall_vars", None) or {}
+
+        shortfall_source = slot_shortfall_vars if slot_shortfall_vars else legacy_shortfall_vars
+
+        if shortfall_source:
+            total_shortfall = sum(self.cp_solver.Value(var) for var in shortfall_source.values())
             statuses.append(ConstraintStatus(
                 name="coverage_constraints",
                 satisfied=total_shortfall == 0,
@@ -290,8 +295,15 @@ class ScheduleReporter:
             ))
         
         # Verifica vincoli di skill
-        if self.solver.skill_shortfall_vars:
-            total_skill_shortfall = sum(self.cp_solver.Value(var) for var in self.solver.skill_shortfall_vars.values())
+        slot_skill_shortfall_vars = getattr(self.solver, "slot_skill_shortfall_vars", None) or {}
+        legacy_skill_shortfall_vars = getattr(self.solver, "skill_shortfall_vars", None) or {}
+
+        skill_shortfall_source = (
+            slot_skill_shortfall_vars if slot_skill_shortfall_vars else legacy_skill_shortfall_vars
+        )
+
+        if skill_shortfall_source:
+            total_skill_shortfall = sum(self.cp_solver.Value(var) for var in skill_shortfall_source.values())
             statuses.append(ConstraintStatus(
                 name="skill_constraints",
                 satisfied=total_skill_shortfall == 0,
