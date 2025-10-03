@@ -67,6 +67,28 @@ logger = logging.getLogger(__name__)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 
+def _clear_solver_reports(reports_dir: Path | None = None) -> None:
+    """Elimina gli artefatti di report di una run precedente quando la solve fallisce."""
+
+    base_dir = reports_dir or Path("reports")
+    targets = (
+        "coverage_plot.png",
+        "segment_coverage.csv",
+        "constraint_status.csv",
+        "objective_breakdown.csv",
+    )
+
+    for name in targets:
+        path = base_dir / name
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            logger.info("Rimosso artefatto di report obsoleto: %s", path)
+        except OSError as exc:  # pragma: no cover - log diagnostico
+            logger.warning("Impossibile rimuovere il file di report %s: %s", path, exc)
+
+
 def _build_objective_weights(priority: Sequence[str], penalties: Mapping[str, float | int]) -> dict[str, int]:
     weights: dict[str, int] = {}
     for key in priority:
@@ -1556,7 +1578,7 @@ class ShiftSchedulingCpSolver:
             return self._solve_lex()
 
         solver = cp_model.CpSolver()
-        if self.config.max_seconds is not None:
+        if self.config.max_seconds is not None and self.config.max_seconds > 0:
             solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
         solver.parameters.log_search_progress = self.config.log_search_progress
         if self.random_seed is not None:
@@ -1572,7 +1594,7 @@ class ShiftSchedulingCpSolver:
         stages = self._collect_lex_stages()
         if not stages:
             solver = cp_model.CpSolver()
-            if self.config.max_seconds is not None:
+            if self.config.max_seconds is not None and self.config.max_seconds > 0:
                 solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
             solver.parameters.log_search_progress = self.config.log_search_progress
             if self.random_seed is not None:
@@ -1600,7 +1622,7 @@ class ShiftSchedulingCpSolver:
             solver = cp_model.CpSolver()
             if per_stage is not None:
                 solver.parameters.max_time_in_seconds = float(per_stage)
-            elif self.config.max_seconds is not None:
+            elif self.config.max_seconds is not None and self.config.max_seconds > 0:
                 solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
             solver.parameters.log_search_progress = self.config.log_search_progress
             if self.random_seed is not None:
@@ -2574,7 +2596,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=level, format=LOG_FORMAT, force=True)
 
     default_time_limit = 30.0
-    max_seconds = args.max_seconds if args.max_seconds is not None else (cfg.solver.time_limit_sec if cfg.solver.time_limit_sec is not None else default_time_limit)
+    if args.max_seconds is not None:
+        max_seconds = float(args.max_seconds)
+    elif cfg.solver.time_limit_sec is not None:
+        max_seconds = float(cfg.solver.time_limit_sec)
+    else:
+        max_seconds = default_time_limit
+    if max_seconds is not None and max_seconds <= 0:
+        logger.info("Time limit non positivo (%.3f); eseguo solve senza limite", max_seconds)
+        max_seconds = None
     global_rest_hours = args.global_rest_hours if args.global_rest_hours is not None else cfg.rest.min_between_shifts
     default_ot_weight = args.default_ot_weight if args.default_ot_weight is not None else DEFAULT_OVERTIME_COST_WEIGHT
 
@@ -2697,6 +2727,7 @@ def main(argv: list[str] | None = None) -> int:
     status = cp_solver.StatusName()
     print("Stato solver:", status)
     if status not in {"OPTIMAL", "FEASIBLE"}:
+        _clear_solver_reports()
         return 1
 
     # Generazione report diagnostici tramite ScheduleReporter

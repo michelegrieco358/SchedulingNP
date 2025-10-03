@@ -110,11 +110,13 @@ class ScheduleReporter:
 
         data = getattr(self.solver, "adaptive_slot_data", None)
         if not data:
-            df = pd.DataFrame(columns=columns)
+            df = self._build_shift_level_coverage(columns)
             output_path = self.output_dir / "segment_coverage.csv"
             df.to_csv(output_path, index=False)
             logger.info("Report copertura segmenti salvato in %s", output_path)
             self._print_coverage_summary(df)
+            if df.empty:
+                self._clear_heatmap()
             return df
 
         slot_bounds = getattr(data, "slot_bounds", {}) or {}
@@ -124,6 +126,8 @@ class ScheduleReporter:
             df.to_csv(output_path, index=False)
             logger.info("Report copertura segmenti salvato in %s", output_path)
             self._print_coverage_summary(df)
+            if df.empty:
+                self._clear_heatmap()
             return df
 
         slot_windows = getattr(data, "slot_windows", {}) or getattr(self.solver, "slot_windows", {}) or {}
@@ -163,6 +167,8 @@ class ScheduleReporter:
             df.to_csv(output_path, index=False)
             logger.info("Report copertura segmenti salvato in %s", output_path)
             self._print_coverage_summary(df)
+            if df.empty:
+                self._clear_heatmap()
             return df
 
         slots_by_segment: dict[str, list[str]] = {}
@@ -291,7 +297,146 @@ class ScheduleReporter:
         df.to_csv(output_path, index=False)
         logger.info("Report copertura segmenti salvato in %s", output_path)
         self._print_coverage_summary(df)
+        if df.empty:
+            self._clear_heatmap()
         return df
+
+    def _build_shift_level_coverage(self, columns: Sequence[str]) -> pd.DataFrame:
+        """Crea un report di copertura usando i dati dei turni (fallback legacy)."""
+
+        shifts_df = getattr(self.solver, "shifts", None)
+        if shifts_df is None or shifts_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        duration_map = getattr(self.solver, "duration_minutes", {}) or {}
+        aggregate_vars = getattr(self.solver, "shift_aggregate_vars", {}) or {}
+        shortfall_vars = getattr(self.solver, "shortfall_vars", {}) or {}
+        overstaff_vars = getattr(self.solver, "shift_overstaff_vars", {}) or {}
+
+        assignment_counts: dict[str, int] = {}
+        if aggregate_vars:
+            assignment_counts = {
+                str(shift_id): int(self.cp_solver.Value(var))
+                for shift_id, var in aggregate_vars.items()
+            }
+        elif self.assignments_df is not None and not self.assignments_df.empty:
+            grouped = self.assignments_df.groupby("shift_id").size()
+            assignment_counts = {str(idx): int(val) for idx, val in grouped.items()}
+
+        def _to_minute(value: Any) -> Optional[int]:
+            if value is None or (isinstance(value, float) and math.isnan(value)):
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, pd.Timestamp):
+                return int(value.hour) * 60 + int(value.minute)
+            if hasattr(value, "hour") and hasattr(value, "minute"):
+                return int(value.hour) * 60 + int(value.minute)
+            if isinstance(value, str):
+                try:
+                    parsed = pd.to_datetime(value, errors="coerce")
+                except Exception:
+                    parsed = None
+                if parsed is not None and not pd.isna(parsed):
+                    return int(parsed.hour) * 60 + int(parsed.minute)
+                try:
+                    parts = value.split(":")
+                    if len(parts) >= 2:
+                        return int(parts[0]) * 60 + int(parts[1])
+                except Exception:
+                    return None
+            return None
+
+        def _format_time(minute: Optional[int]) -> str:
+            if minute is None:
+                return ""
+            minute = max(0, int(minute)) % (24 * 60)
+            return f"{minute // 60:02d}:{minute % 60:02d}"
+
+        coverages: list[SegmentCoverage] = []
+
+        for row in shifts_df.itertuples():
+            shift_id = str(getattr(row, "shift_id"))
+            duration = int(duration_map.get(shift_id, 0))
+            if duration <= 0:
+                continue
+
+            required = int(getattr(row, "required_staff", 0) or 0)
+            assigned_staff = assignment_counts.get(shift_id, 0)
+
+            shortfall_units = 0
+            if shift_id in shortfall_vars:
+                shortfall_units = int(self.cp_solver.Value(shortfall_vars[shift_id]))
+
+            overstaff_units = 0
+            if shift_id in overstaff_vars:
+                overstaff_units = int(self.cp_solver.Value(overstaff_vars[shift_id]))
+
+            demand_minutes = max(0, required * duration)
+            shortfall_minutes = max(0, shortfall_units * duration)
+            overstaff_minutes = max(0, overstaff_units * duration)
+            assigned_minutes = max(0, assigned_staff * duration)
+
+            if demand_minutes or shortfall_minutes or assigned_minutes or overstaff_minutes:
+                # Ricalibra gli assegnati per rispettare la relazione domanda/shortfall/overstaff
+                assigned_minutes = max(0, demand_minutes - shortfall_minutes + overstaff_minutes)
+
+            if not (demand_minutes or assigned_minutes or shortfall_minutes or overstaff_minutes):
+                continue
+
+            start_dt = getattr(row, "start_dt", None)
+            end_dt = getattr(row, "end_dt", None)
+
+            start_minute = _to_minute(start_dt)
+            end_minute = _to_minute(end_dt)
+            if start_minute is None and hasattr(row, "start"):
+                start_minute = _to_minute(getattr(row, "start"))
+            if end_minute is None and hasattr(row, "end"):
+                end_minute = _to_minute(getattr(row, "end"))
+
+            if start_minute is None:
+                continue
+            if end_minute is None:
+                end_minute = start_minute + duration
+            if end_minute <= start_minute:
+                end_minute = start_minute + duration
+
+            day_label = str(getattr(row, "day", "") or "")
+            role_label = str(getattr(row, "role", "") or "")
+
+            coverages.append(
+                SegmentCoverage(
+                    segment_id=shift_id,
+                    day=day_label,
+                    role=role_label,
+                    start_minute=int(start_minute),
+                    end_minute=int(end_minute),
+                    start_time=_format_time(start_minute),
+                    end_time=_format_time(end_minute),
+                    demand=int(demand_minutes),
+                    assigned=int(assigned_minutes),
+                    shortfall=int(shortfall_minutes),
+                    overstaffing=int(overstaff_minutes),
+                )
+            )
+
+        if not coverages:
+            return pd.DataFrame(columns=columns)
+
+        df = pd.DataFrame([vars(c) for c in coverages])
+        df = df[columns]
+        return df
+
+    def _clear_heatmap(self) -> None:
+        """Rimuove l'immagine della heatmap precedente se non sono disponibili dati."""
+
+        plot_path = self.output_dir / "coverage_plot.png"
+        if plot_path.exists():
+            try:
+                plot_path.unlink()
+                logger.info("Heatmap di copertura rimossa: nessun dato disponibile")
+            except OSError as exc:
+                logger.warning("Impossibile rimuovere la heatmap esistente: %s", exc)
 
     def generate_constraint_report(self) -> pd.DataFrame:
         """Genera report sullo stato dei vincoli principali.
