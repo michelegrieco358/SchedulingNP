@@ -1749,6 +1749,33 @@ class ShiftSchedulingCpSolver:
         if not self.shift_skill_requirements:
             return pd.DataFrame(columns=columns)
 
+        slot_skill_shortfall_vars = getattr(self, "slot_skill_shortfall_vars", None) or {}
+        use_slot_shortfalls = bool(slot_skill_shortfall_vars)
+        slot_shortfall_totals: dict[tuple[str, str], int] = {}
+
+        if use_slot_shortfalls:
+            segment_owner: dict[str, str] = {}
+            if self.adaptive_slot_data is not None:
+                segment_owner = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+            if not segment_owner and getattr(self, "shift_to_covering_segments", None):
+                for shift_key, segments in self.shift_to_covering_segments.items():
+                    for segment_id in segments:
+                        segment_owner.setdefault(segment_id, shift_key)
+
+            for (slot_id, skill_name), var in slot_skill_shortfall_vars.items():
+                units = int(solver.Value(var))
+                if units <= 0:
+                    continue
+
+                owner_shift = segment_owner.get(slot_id)
+                if owner_shift is None and isinstance(slot_id, str) and "__" in slot_id:
+                    owner_shift = slot_id.split("__", 1)[0]
+                if owner_shift is None:
+                    owner_shift = str(slot_id)
+
+                key = (str(owner_shift), str(skill_name))
+                slot_shortfall_totals[key] = slot_shortfall_totals.get(key, 0) + units
+
         rows = []
         for shift_id, requirements in self.shift_skill_requirements.items():
             if not requirements:
@@ -1759,9 +1786,14 @@ class ShiftSchedulingCpSolver:
                 for emp_id, var in vars_with_emp:
                     if skill_name in self.emp_skills.get(emp_id, set()):
                         covered += int(solver.Value(var))
-                shortfall = 0
-                if (shift_id, skill_name) in self.skill_shortfall_vars:
-                    shortfall = int(solver.Value(self.skill_shortfall_vars[(shift_id, skill_name)]))
+
+                if use_slot_shortfalls:
+                    shortfall = slot_shortfall_totals.get((str(shift_id), str(skill_name)), 0)
+                else:
+                    shortfall = 0
+                    if (shift_id, skill_name) in self.skill_shortfall_vars:
+                        shortfall = int(solver.Value(self.skill_shortfall_vars[(shift_id, skill_name)]))
+
                 rows.append(
                     {
                         "shift_id": shift_id,

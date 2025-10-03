@@ -216,3 +216,67 @@ def test_constraint_report_prefers_slot_shortfalls(tmp_path, monkeypatch):
 
     csv_skill = csv_df[csv_df["name"] == "skill_constraints"].iloc[0]
     assert csv_skill["violation"] == pytest.approx(4)
+
+
+def test_skill_coverage_report_uses_slot_shortfalls(sample_environment, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    solver = sample_environment.solver
+
+    assert not solver.shifts.empty, "expected at least one shift"
+    shift_id = solver.shifts.iloc[0]["shift_id"]
+    assert shift_id, "missing shift identifier"
+    shift_id_str = str(shift_id)
+
+    assert solver.emp_skills, "expected employee skills"
+    first_skill_set = next(iter(solver.emp_skills.values()))
+    assert first_skill_set, "expected at least one skill"
+    skill_name = next(iter(first_skill_set))
+
+    solver.shift_skill_requirements = {shift_id_str: {str(skill_name): 1}}
+
+    segments = solver.shift_to_covering_segments.get(shift_id_str, [])
+    assert segments, "expected at least one covering segment"
+    base_segment = segments[0]
+    extra_segment = f"{base_segment}__extra"
+
+    slot_var_a = object()
+    slot_var_b = object()
+    legacy_var = object()
+
+    solver.slot_skill_shortfall_vars = {
+        (base_segment, skill_name): slot_var_a,
+        (extra_segment, skill_name): slot_var_b,
+    }
+    solver.skill_shortfall_vars = {(shift_id_str, str(skill_name)): legacy_var}
+
+    if hasattr(solver, "adaptive_slot_data") and solver.adaptive_slot_data is not None:
+        segment_owner = getattr(solver.adaptive_slot_data, "segment_owner", {})
+        if segment_owner is not None:
+            segment_owner[base_segment] = shift_id
+            segment_owner[extra_segment] = shift_id
+
+    solver.shift_to_covering_segments.setdefault(shift_id_str, []).append(extra_segment)
+
+    cp_solver = DummyCpSolver({slot_var_a: 2, slot_var_b: 1, legacy_var: 99})
+
+    coverage_df = solver.extract_skill_coverage_summary(cp_solver)
+    assert not coverage_df.empty
+
+    row = coverage_df[
+        (coverage_df["shift_id"] == shift_id_str) & (coverage_df["skill"] == str(skill_name))
+    ]
+    assert not row.empty
+    assert row.iloc[0]["shortfall"] == 3
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "skill_coverage_report.csv"
+    coverage_df.to_csv(output_path, index=False)
+
+    saved_df = pd.read_csv(output_path)
+    saved_row = saved_df[
+        (saved_df["shift_id"] == shift_id_str) & (saved_df["skill"] == str(skill_name))
+    ]
+    assert not saved_row.empty
+    assert saved_row.iloc[0]["shortfall"] == 3
