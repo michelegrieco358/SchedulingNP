@@ -5,7 +5,8 @@ e generare report dettagliati sulla copertura, i vincoli e l'obiettivo.
 """
 from pathlib import Path
 import logging
-import datetime as dt
+import math
+from functools import reduce
 from typing import Dict, Any, Mapping, Sequence, Optional
 from dataclasses import dataclass
 import pandas as pd
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 class SegmentCoverage:
     """Dati di copertura per un segmento temporale."""
     segment_id: str
+    day: str
+    role: str
+    start_minute: int
+    end_minute: int
     start_time: str
     end_time: str
     demand: int
@@ -91,6 +96,10 @@ class ScheduleReporter:
         """
         columns = [
             "segment_id",
+            "day",
+            "role",
+            "start_minute",
+            "end_minute",
             "start_time",
             "end_time",
             "demand",
@@ -128,6 +137,13 @@ class ScheduleReporter:
             segment_shortfalls = {
                 seg_id: float(self.cp_solver.Value(var))
                 for seg_id, var in self.solver.segment_shortfall_vars.items()
+            }
+
+        segment_overstaffs: dict[str, float] = {}
+        if hasattr(self.solver, "segment_overstaff_vars") and self.solver.segment_overstaff_vars:
+            segment_overstaffs = {
+                seg_id: float(self.cp_solver.Value(var))
+                for seg_id, var in self.solver.segment_overstaff_vars.items()
             }
 
         slot_minutes: dict[str, int] = {}
@@ -193,6 +209,13 @@ class ScheduleReporter:
             start_time = _format_time(start_min)
             end_time = _format_time(end_min)
 
+            day_label = ""
+            role_label = ""
+            parts = str(slot_id).split("__")
+            if len(parts) >= 3:
+                day_label = parts[0]
+                role_label = parts[1]
+
             demand_from_windows = 0.0
             for window_info in slot_windows.get(slot_id, []):
                 if isinstance(window_info, tuple):
@@ -208,6 +231,7 @@ class ScheduleReporter:
 
             assigned_sum = 0.0
             shortfall_sum = 0.0
+            overstaff_sum = 0.0
             demand_from_segments = 0.0
 
             covering_segments = segments_by_slot.get(slot_id, [])
@@ -218,18 +242,21 @@ class ScheduleReporter:
                     continue
                 seg_demand = float(segment_demands.get(segment_id, 0))
                 seg_shortfall = float(segment_shortfalls.get(segment_id, 0))
+                seg_overstaff = float(segment_overstaffs.get(segment_id, 0))
                 if seg_demand <= 0 and seg_shortfall <= 0:
                     continue
                 share = duration / total_minutes
                 demand_contrib = seg_demand * share
                 shortfall_contrib = seg_shortfall * share
-                assigned_contrib = max(0.0, demand_contrib - shortfall_contrib)
+                overstaff_contrib = seg_overstaff * share
+                assigned_contrib = max(0.0, demand_contrib - shortfall_contrib + overstaff_contrib)
 
                 demand_from_segments += demand_contrib
                 shortfall_sum += shortfall_contrib
+                overstaff_sum += overstaff_contrib
                 assigned_sum += assigned_contrib
 
-            if demand_from_windows <= 0 and demand_from_segments > 0:
+            if demand_from_segments > 0:
                 demand_value = demand_from_segments
             else:
                 demand_value = demand_from_windows
@@ -237,11 +264,16 @@ class ScheduleReporter:
             demand_int = int(round(demand_value)) if demand_value > 0 else 0
             assigned_int = int(round(assigned_sum)) if assigned_sum > 0 else 0
             shortfall_int = int(round(shortfall_sum)) if shortfall_sum > 0 else 0
-            overstaffing = max(0, assigned_int - demand_int)
+            overstaff_int = int(round(overstaff_sum)) if overstaff_sum > 0 else 0
+            overstaffing = max(overstaff_int, assigned_int - demand_int, 0)
 
             coverages.append(
                 SegmentCoverage(
                     segment_id=slot_id,
+                    day=day_label,
+                    role=role_label,
+                    start_minute=int(start_min),
+                    end_minute=int(end_min),
                     start_time=start_time,
                     end_time=end_time,
                     demand=demand_int,
@@ -426,10 +458,10 @@ class ScheduleReporter:
             self._plot_coverage(coverage_df)
 
     def _plot_coverage(self, coverage_df: pd.DataFrame) -> None:
-        """Genera una heatmap domanda/copertura utilizzando assignments e windows."""
+        """Genera una heatmap domanda/copertura basata sui microslot del solver."""
 
-        if self.windows_df is None or getattr(self.windows_df, "empty", True):
-            logger.info("Nessuna windows_df disponibile: salto la generazione della heatmap di copertura")
+        if coverage_df.empty:
+            logger.info("Coverage_df vuoto: heatmap di copertura non generata")
             return
 
         try:
@@ -442,178 +474,107 @@ class ScheduleReporter:
             logger.error(f"Errore nell'import dei pacchetti di plotting: {exc}")
             return
 
-        assignments_df = self.assignments_df
-        if assignments_df is None:
-            try:
-                assignments_df = self.solver.extract_assignments(self.cp_solver)
-                self.assignments_df = assignments_df
-            except Exception as exc:  # pragma: no cover - fallback diagnostico
-                logger.error(f"Impossibile estrarre le assegnazioni dal solver: {exc}")
-                return
+        df = coverage_df.copy()
 
-        if assignments_df is None or assignments_df.empty:
-            logger.info("Nessuna assegnazione attiva: heatmap di copertura non generata")
+        if "day" not in df.columns:
+            df["day"] = ""
+        if "role" not in df.columns:
+            df["role"] = ""
+
+        df["day"] = df["day"].fillna("").astype(str)
+        df["role"] = df["role"].fillna("").astype(str)
+
+        unique_keys = sorted({(row.day, row.role) for row in df.itertuples()})
+        if not unique_keys:
+            logger.info("Nessuna combinazione (giorno, ruolo) trovata: heatmap non generata")
             return
 
-        windows_df = self.windows_df
-        if windows_df is None or windows_df.empty:
-            logger.info("DataFrame windows_df vuoto: heatmap di copertura non generata")
+        key_to_col = {key: idx for idx, key in enumerate(unique_keys)}
+        labels = [f"{day}\n{role}" if role else day for day, role in unique_keys]
+
+        if "start_minute" not in df.columns or "end_minute" not in df.columns:
+            logger.info("Copertura segmenti priva di start/end minuti: heatmap non generata")
             return
 
-        slot_minutes = 60
+        durations = [
+            max(0, int(end) - int(start))
+            for start, end in zip(df["start_minute"], df["end_minute"])
+            if pd.notna(start) and pd.notna(end)
+        ]
 
-        day_series = windows_df["day"].astype(str)
-        days = sorted(day_series.unique())
-        if not days:
-            logger.info("Nessun giorno presente in windows_df: heatmap di copertura non generata")
+        durations = [d for d in durations if d > 0]
+        if not durations:
+            logger.info("Durate segmenti non positive: heatmap non generata")
             return
 
-        day_to_col = {day: idx for idx, day in enumerate(days)}
-        n_days = len(days)
-        n_slots = 24 * 60 // slot_minutes
+        base_minutes = reduce(math.gcd, durations)
+        base_minutes = math.gcd(base_minutes, 1440)
+        if base_minutes <= 0:
+            base_minutes = 60
 
-        demand_matrix = np.zeros((n_slots, n_days), dtype=float)
-        coverage_matrix = np.zeros((n_slots, n_days), dtype=float)
+        n_rows = 1440 // base_minutes
+        n_cols = len(unique_keys)
 
-        def _coerce_minute_value(value: Any) -> Optional[int]:
-            """Return an integer minute offset when possible."""
+        demand_matrix = np.zeros((n_rows, n_cols), dtype=float)
+        assigned_matrix = np.zeros((n_rows, n_cols), dtype=float)
 
-            if value is None:
-                return None
-            try:
-                if pd.isna(value):
-                    return None
-            except TypeError:
-                # Non-scalar values fall through to conversion attempt.
-                pass
-
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        def _parse_time_like(value: Any) -> Optional[int]:
-            """Parse datetime/time or HH:MM strings into minutes from midnight."""
-
-            if value is None:
-                return None
-
-            if isinstance(value, dt.datetime):
-                return value.hour * 60 + value.minute
-
-            if isinstance(value, dt.time):
-                return value.hour * 60 + value.minute
-
-            if isinstance(value, pd.Timestamp):
-                if pd.isna(value):
-                    return None
-                return value.hour * 60 + value.minute
-
-            if isinstance(value, str):
-                text = value.strip()
-                if not text:
-                    return None
-                try:
-                    hour_str, minute_str = text.split(":", 1)
-                    return int(hour_str) * 60 + int(minute_str)
-                except (ValueError, AttributeError):
-                    return None
-
-            return None
-
-        for _, win in windows_df.iterrows():
-            day_label = str(win.get("day", ""))
-            col = day_to_col.get(day_label)
+        for row in df.itertuples():
+            key = (row.day, row.role)
+            col = key_to_col.get(key)
             if col is None:
                 continue
 
-            start_minute = _coerce_minute_value(win.get("window_start_min"))
-            end_minute = _coerce_minute_value(win.get("window_end_min"))
-
-            if start_minute is None or end_minute is None:
-                start_minute = _parse_time_like(win.get("window_start"))
-                end_minute = _parse_time_like(win.get("window_end"))
-
-            if start_minute is None or end_minute is None:
-                start_repr = win.get("window_start")
-                end_repr = win.get("window_end")
-                logger.debug(
-                    "Window %s ha orari non validi (%s-%s)",
-                    win.get("window_id"),
-                    start_repr,
-                    end_repr,
-                )
-                continue
-
-            start_idx = max(0, min(n_slots, start_minute // slot_minutes))
-            end_idx = max(start_idx + 1, min(n_slots, end_minute // slot_minutes))
-
-            demand = win.get("window_demand", 0)
             try:
-                demand_val = float(demand)
+                start_min = int(row.start_minute)
+                end_min = int(row.end_minute)
             except (TypeError, ValueError):
-                demand_val = 0.0
-
-            demand_matrix[start_idx:end_idx, col] += demand_val
-
-        assignments_df_local = assignments_df.copy()
-        if "day" not in assignments_df_local.columns:
-            if "start_dt" in assignments_df_local.columns:
-                assignments_df_local["day"] = (
-                    pd.to_datetime(assignments_df_local["start_dt"], errors="coerce").dt.date.astype(str)
-                )
-            else:
-                assignments_df_local["day"] = ""
-        else:
-            assignments_df_local["day"] = assignments_df_local["day"].astype(str)
-
-        for _, row in assignments_df_local.iterrows():
-            col = day_to_col.get(str(row.get("day", "")))
-            if col is None:
                 continue
 
-            start_dt = pd.to_datetime(row.get("start_dt"), errors="coerce")
-            end_dt = pd.to_datetime(row.get("end_dt"), errors="coerce")
-
-            if pd.isna(start_dt) or pd.isna(end_dt):
-                day_label = row.get("day")
-                start_str = row.get("start") or row.get("start_time")
-                end_str = row.get("end") or row.get("end_time")
-                if day_label and start_str:
-                    start_dt = pd.to_datetime(f"{day_label} {start_str}", errors="coerce")
-                if day_label and end_str:
-                    end_dt = pd.to_datetime(f"{day_label} {end_str}", errors="coerce")
-
-            if pd.isna(start_dt) or pd.isna(end_dt):
+            duration = max(0, end_min - start_min)
+            if duration <= 0:
                 continue
 
-            start_idx = max(0, min(n_slots, (start_dt.hour * 60 + start_dt.minute) // slot_minutes))
-            end_idx_raw = (end_dt.hour * 60 + end_dt.minute) // slot_minutes
-            end_idx = max(start_idx + 1, min(n_slots, end_idx_raw))
+            demand_val = float(row.demand)
+            assigned_val = float(row.assigned)
 
-            coverage_matrix[start_idx:end_idx, col] += 1.0
+            start_idx = max(0, min(n_rows, start_min // base_minutes))
+            end_idx = max(start_idx + 1, min(n_rows, math.ceil(end_min / base_minutes)))
 
-        shortfall_matrix = np.maximum(demand_matrix - coverage_matrix, 0.0)
+            for idx in range(start_idx, end_idx):
+                bucket_start = idx * base_minutes
+                bucket_end = bucket_start + base_minutes
+                overlap = min(end_min, bucket_end) - max(start_min, bucket_start)
+                if overlap <= 0:
+                    continue
+                weight = overlap / duration
+                demand_matrix[idx, col] += demand_val * weight
+                assigned_matrix[idx, col] += assigned_val * weight
 
-        fig = plt.figure(figsize=(n_days * 1.5 if n_days else 6, 8))
+        shortfall_matrix = np.maximum(demand_matrix - assigned_matrix, 0.0)
+
+        fig = plt.figure(figsize=(max(6, n_cols * 1.5), 8))
         ax = fig.add_subplot(111)
         heatmap = ax.imshow(shortfall_matrix, aspect="auto", cmap="Reds", origin="lower")
 
-        for col_idx in range(1, n_days):
+        for col_idx in range(1, n_cols):
             ax.axvline(x=col_idx - 0.5, color="black", linestyle="-", linewidth=2.5, alpha=1.0)
 
-        ax.set_xlabel("Giorno")
+        ax.set_xlabel("Giorno / Ruolo")
         ax.set_ylabel("Orario")
-        ax.set_xticks(range(n_days))
-        ax.set_xticklabels(days)
+        ax.set_xticks(range(n_cols))
+        ax.set_xticklabels(labels, rotation=0)
 
-        hour_ticks = [i for i in range(n_slots) if (i * slot_minutes) % 60 == 0]
-        hour_labels = [f"{hour:02d}:00" for hour in range(24)]
-        ax.set_yticks(hour_ticks)
-        ax.set_yticklabels(hour_labels)
+        tick_interval = max(1, int(round(60 / base_minutes)))
+        tick_positions = list(range(0, n_rows, tick_interval))
+        tick_labels = [
+            f"{(idx * base_minutes) // 60:02d}:{(idx * base_minutes) % 60:02d}"
+            for idx in tick_positions
+        ]
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(tick_labels)
 
         ax.set_title("Shortfall di copertura (rosso = scopertura)")
-        fig.colorbar(heatmap, ax=ax, label="Shortfall (persone mancanti)")
+        fig.colorbar(heatmap, ax=ax, label="Shortfall (persona-minuti)")
         fig.tight_layout()
 
         plot_path = self.output_dir / "coverage_plot.png"
