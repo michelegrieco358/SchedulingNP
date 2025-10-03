@@ -554,6 +554,16 @@ class ScheduleReporter:
         partial = len(coverage_df[(coverage_df["shortfall"] > 0) & (coverage_df["assigned"] > 0)])
         uncovered = len(coverage_df[coverage_df["assigned"] == 0])
 
+        demand_sum = float(coverage_df["demand"].sum())
+        assigned_sum = float(coverage_df["assigned"].sum())
+        shortfall_sum = float(coverage_df["shortfall"].sum())
+        overstaff_sum = float(coverage_df["overstaffing"].sum())
+        overall_coverage_pct = (
+            100.0
+            if demand_sum <= 0
+            else max(0.0, min(100.0, (assigned_sum / demand_sum) * 100.0))
+        )
+
         header = f"{'Intervallo':<17} {'Stato':<6} {'Rich':>5} {'Ass':>5} {'Delta':>6} | {'Copertura':<20}"
         print(header)
         print('-' * len(header))
@@ -598,6 +608,57 @@ class ScheduleReporter:
             f"Partial: {partial:3d} PART  "
             f"Uncovered: {uncovered:3d} MISS"
         )
+
+        print(
+            f"Domanda totale: {demand_sum / 60.0:.1f} h  "
+            f"Assegnati: {assigned_sum / 60.0:.1f} h  "
+            f"Shortfall: {shortfall_sum / 60.0:.1f} h  "
+            f"Overstaff: {overstaff_sum / 60.0:.1f} h"
+        )
+        print(f"Copertura media (minuti): {overall_coverage_pct:.1f}%")
+
+        employees_df = getattr(self.solver, "employees", None)
+        if employees_df is None or getattr(employees_df, "empty", True):
+            return
+
+        try:
+            df = employees_df.copy()
+            for column in ("contracted_hours", "max_week_hours", "max_overtime_hours"):
+                if column not in df.columns:
+                    df[column] = 0.0
+            df["contracted_hours"] = pd.to_numeric(df["contracted_hours"], errors="coerce")
+            df["max_week_hours"] = pd.to_numeric(df["max_week_hours"], errors="coerce")
+            df["max_overtime_hours"] = pd.to_numeric(df["max_overtime_hours"], errors="coerce")
+
+            internal_mask = df["contracted_hours"].notna() & (df["contracted_hours"] > 0)
+            internal_hours = float(df.loc[internal_mask, "contracted_hours"].sum())
+            external_hours = float(df.loc[~internal_mask, "max_week_hours"].fillna(0).sum())
+            overtime_hours = float(df["max_overtime_hours"].clip(lower=0).fillna(0).sum())
+
+            base_capacity = internal_hours + external_hours
+            total_capacity = base_capacity + overtime_hours
+
+            if base_capacity <= 0 and total_capacity <= 0:
+                return
+
+            print(
+                "Capacità teorica settimanale: "
+                f"{base_capacity:.1f} h "
+                f"(+{overtime_hours:.1f} h straordinario) = {total_capacity:.1f} h"
+            )
+
+            if total_capacity > 0:
+                utilisation = max(0.0, min(100.0, (assigned_sum / (total_capacity * 60.0)) * 100.0))
+                print(
+                    f"Utilizzo capacità stimato: {assigned_sum / 60.0:.1f} h "
+                    f"({utilisation:.1f}% della capacità massima)"
+                )
+
+            demand_gap = (demand_sum / 60.0) - total_capacity
+            if demand_gap > 0:
+                print(f"Domanda eccedente la capacità stimata di circa {demand_gap:.1f} h")
+        except Exception as exc:  # pragma: no cover - diagnostica
+            logger.debug("Impossibile calcolare la capacità teorica: %s", exc)
 
         if not coverage_df.empty:
             self._plot_coverage(coverage_df)
