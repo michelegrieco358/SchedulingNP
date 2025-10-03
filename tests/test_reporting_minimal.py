@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import datetime as dt
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,6 +17,10 @@ def test_reporting_generates_files(sample_environment, tmp_path, monkeypatch):
     segment_df = reporter.generate_segment_coverage_report()
     assert list(segment_df.columns) == [
         "segment_id",
+        "day",
+        "role",
+        "start_minute",
+        "end_minute",
         "start_time",
         "end_time",
         "demand",
@@ -60,38 +63,17 @@ def test_plot_coverage_accepts_time_objects(tmp_path, monkeypatch):
     coverage_df = pd.DataFrame(
         [
             {
-                "segment_id": "seg-1",
+                "segment_id": "2024-01-01__Nurse__0540_0600",
+                "day": "2024-01-01",
+                "role": "Nurse",
+                "start_minute": 9 * 60,
+                "end_minute": 10 * 60,
                 "start_time": "09:00",
                 "end_time": "10:00",
-                "demand": 2,
+                "demand": 60,
                 "assigned": 0,
-                "shortfall": 2,
+                "shortfall": 60,
                 "overstaffing": 0,
-            }
-        ]
-    )
-
-    reporter.assignments_df = pd.DataFrame(
-        [
-            {
-                "employee": "emp-1",
-                "day": "2024-01-01",
-                "start_dt": pd.Timestamp("2024-01-01 09:00"),
-                "end_dt": pd.Timestamp("2024-01-01 10:00"),
-            }
-        ]
-    )
-
-    reporter.windows_df = pd.DataFrame(
-        [
-            {
-                "window_id": "win-1",
-                "day": "2024-01-01",
-                "window_start": dt.time(9, 0),
-                "window_end": dt.time(10, 0),
-                "window_start_min": 9 * 60,
-                "window_end_min": 10 * 60,
-                "window_demand": 2,
             }
         ]
     )
