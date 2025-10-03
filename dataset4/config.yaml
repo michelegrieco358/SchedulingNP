@@ -1,0 +1,43 @@
+hours:
+  min_weekly: 0
+  max_weekly: 40
+  max_daily: 12
+  max_overtime: 4
+rest:
+  min_between_shifts: 8
+skills:
+  enable_slack: true
+  skill_mode: "by_shift"  # "by_shift" o "by_segment"
+shifts:
+  demand_mode: "headcount"  # "headcount" | "person_minutes"
+  coverage_source: "shifts"  # "windows" | "shifts"
+penalties:
+  unmet_window: 2.0
+  unmet_demand: 1.0
+  unmet_skill: 0.8
+  overstaff: 0.15
+  overtime: 0.30
+  external_use: 0.70
+  preferences: 0.33
+  fairness: 0.05
+objective:
+  priority:
+    - unmet_window
+    - unmet_demand
+    - unmet_skill
+    - overstaff
+    - external_use
+    - overtime
+    - fairness
+    - preferences
+random:
+  seed: 123
+solver:
+  time_limit_sec: null
+  mip_gap: null
+logging:
+  level: INFO
+windows:
+  midnight_policy: split
+  warn_slots_threshold: 500
+  hard_slots_threshold: 2000
