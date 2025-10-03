@@ -1844,110 +1844,202 @@ class ShiftSchedulingCpSolver:
 
     def extract_skill_coverage_summary(self, solver: cp_model.CpSolver) -> pd.DataFrame:
         columns = ["shift_id", "skill", "required", "covered", "shortfall"]
-        if not self.shift_skill_requirements:
-            return pd.DataFrame(columns=columns)
 
         segment_skill_shortfall_vars = getattr(self, "segment_skill_shortfall_vars", None) or {}
         slot_skill_shortfall_vars = getattr(self, "slot_skill_shortfall_vars", None) or {}
-
-        segment_shortfall_minutes: dict[tuple[str, str], int] = {}
-        if segment_skill_shortfall_vars:
-            owner_map: dict[str, str] = {}
-            if self.adaptive_slot_data is not None:
-                owner_map = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
-            if not owner_map and getattr(self, "shift_to_covering_segments", None):
-                for shift_key, segments in self.shift_to_covering_segments.items():
-                    for segment_id in segments:
-                        owner_map.setdefault(segment_id, shift_key)
-
-            for (segment_id, skill_name), var in segment_skill_shortfall_vars.items():
-                minutes = int(solver.Value(var))
-                if minutes <= 0:
-                    continue
-
-                owner_shift = owner_map.get(segment_id)
-                if owner_shift is None and isinstance(segment_id, str) and "__" in segment_id:
-                    owner_shift = segment_id.split("__", 1)[0]
-                if owner_shift is None:
-                    owner_shift = str(segment_id)
-
-                key = (str(owner_shift), str(skill_name))
-                segment_shortfall_minutes[key] = segment_shortfall_minutes.get(key, 0) + minutes
-
-        slot_shortfall_totals: dict[tuple[str, str], int] = {}
-        if slot_skill_shortfall_vars:
-            owner_map: dict[str, str] = {}
-            if self.adaptive_slot_data is not None:
-                owner_map = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
-            if not owner_map and getattr(self, "shift_to_covering_segments", None):
-                for shift_key, segments in self.shift_to_covering_segments.items():
-                    for segment_id in segments:
-                        owner_map.setdefault(segment_id, shift_key)
-
-            for (slot_id, skill_name), var in slot_skill_shortfall_vars.items():
-                units = int(solver.Value(var))
-                if units <= 0:
-                    continue
-
-                owner_shift = owner_map.get(slot_id)
-                if owner_shift is None and isinstance(slot_id, str) and "__" in slot_id:
-                    owner_shift = slot_id.split("__", 1)[0]
-                if owner_shift is None:
-                    owner_shift = str(slot_id)
-
-                key = (str(owner_shift), str(skill_name))
-                slot_shortfall_totals[key] = slot_shortfall_totals.get(key, 0) + units
-
         skill_shortfall_vars = getattr(self, "skill_shortfall_vars", None) or {}
 
-        rows = []
-        for shift_id, requirements in self.shift_skill_requirements.items():
+        duration_map = getattr(self, "duration_minutes", {}) or {}
+
+        shift_display_map: dict[str, object] = {}
+        for shift_id in getattr(self, "_vars_by_shift_emp", {}).keys():
+            shift_display_map.setdefault(str(shift_id), shift_id)
+        if getattr(self, "shifts", None) is not None and "shift_id" in self.shifts.columns:
+            for value in self.shifts["shift_id"]:
+                shift_display_map.setdefault(str(value), value)
+
+        def _register_shift(identifier: object) -> str:
+            key = str(identifier)
+            shift_display_map.setdefault(key, identifier)
+            return key
+
+        def _get_shift_duration(shift_key: str) -> int:
+            candidates = []
+            if shift_key in shift_display_map:
+                original = shift_display_map[shift_key]
+                candidates.extend([original, str(original)])
+            candidates.extend([shift_key, str(shift_key)])
+
+            for candidate in candidates:
+                if candidate in duration_map:
+                    try:
+                        return max(1, int(duration_map[candidate]))
+                    except (TypeError, ValueError):
+                        continue
+
+            default_duration = next(iter(duration_map.values()), None)
+            if default_duration is None:
+                default_duration = getattr(self, "avg_shift_minutes", 60)
+            try:
+                return max(1, int(default_duration))
+            except (TypeError, ValueError):
+                return 1
+
+        owner_map: dict[str, str] = {}
+        if self.adaptive_slot_data is not None:
+            owner_map = getattr(self.adaptive_slot_data, "segment_owner", {}) or {}
+        if not owner_map:
+            segments_map = getattr(self, "shift_to_covering_segments", {}) or {}
+            if not segments_map:
+                try:
+                    self._precompute_shift_to_segments_mapping()
+                    segments_map = getattr(self, "shift_to_covering_segments", {}) or {}
+                except AttributeError:
+                    segments_map = {}
+            for shift_id, segments in segments_map.items():
+                shift_key = _register_shift(shift_id)
+                for segment_id in segments or []:
+                    owner_map.setdefault(segment_id, shift_key)
+        else:
+            owner_map = {segment_id: _register_shift(owner) for segment_id, owner in owner_map.items()}
+
+        def _resolve_shift_for_identifier(identifier: object) -> str:
+            owner_shift = owner_map.get(identifier)
+            if owner_shift is not None:
+                return _register_shift(owner_shift)
+            if isinstance(identifier, str) and "__" in identifier:
+                return _register_shift(identifier.split("__", 1)[0])
+            return _register_shift(identifier)
+
+        segment_shortfall_minutes: dict[tuple[str, str], int] = {}
+        for (segment_id, skill_name), var in segment_skill_shortfall_vars.items():
+            minutes = int(solver.Value(var))
+            if minutes <= 0:
+                continue
+            shift_key = _resolve_shift_for_identifier(segment_id)
+            skill_key = str(skill_name)
+            key = (shift_key, skill_key)
+            segment_shortfall_minutes[key] = segment_shortfall_minutes.get(key, 0) + minutes
+
+        slot_shortfall_totals: dict[tuple[str, str], int] = {}
+        for (slot_id, skill_name), var in slot_skill_shortfall_vars.items():
+            units = int(solver.Value(var))
+            if units <= 0:
+                continue
+            shift_key = _resolve_shift_for_identifier(slot_id)
+            skill_key = str(skill_name)
+            key = (shift_key, skill_key)
+            slot_shortfall_totals[key] = slot_shortfall_totals.get(key, 0) + units
+
+        required_by_shift_skill: dict[tuple[str, str], int] = {}
+        for shift_id, requirements in (self.shift_skill_requirements or {}).items():
             if not requirements:
                 continue
-            vars_with_emp = self._vars_by_shift_emp.get(shift_id, [])
+            shift_key = _register_shift(shift_id)
             for skill_name, required in requirements.items():
-                covered = 0
+                try:
+                    required_int = int(required)
+                except (TypeError, ValueError):
+                    continue
+                required_by_shift_skill[(shift_key, str(skill_name))] = required_int
+
+        if getattr(self, "segment_skill_demands", None) is None:
+            self.segment_skill_demands = {}
+        if not self.segment_skill_demands and getattr(self, "using_window_skills", False):
+            try:
+                self._compute_segment_skill_demands()
+            except AttributeError:
+                pass
+
+        segment_demand_minutes: dict[tuple[str, str], int] = {}
+        for (segment_id, skill_name), minutes in (self.segment_skill_demands or {}).items():
+            if minutes <= 0:
+                continue
+            shift_key = _resolve_shift_for_identifier(segment_id)
+            skill_key = str(skill_name)
+            key = (shift_key, skill_key)
+            segment_demand_minutes[key] = segment_demand_minutes.get(key, 0) + int(minutes)
+
+        segment_required_headcount: dict[tuple[str, str], int] = {}
+        for key, minutes in segment_demand_minutes.items():
+            shift_key, _ = key
+            duration_int = _get_shift_duration(shift_key)
+            if minutes > 0:
+                segment_required_headcount[key] = int(math.ceil(minutes / duration_int))
+            else:
+                segment_required_headcount[key] = 0
+
+        for key, value in segment_required_headcount.items():
+            required_by_shift_skill.setdefault(key, value)
+
+        all_keys: set[tuple[str, str]] = set(required_by_shift_skill.keys())
+        all_keys.update(segment_required_headcount.keys())
+        all_keys.update(segment_shortfall_minutes.keys())
+        all_keys.update(slot_shortfall_totals.keys())
+
+        for shift_id, skill_name in skill_shortfall_vars.keys():
+            shift_key = _register_shift(shift_id)
+            all_keys.add((shift_key, str(skill_name)))
+
+        rows = []
+        for shift_key, skill_key in sorted(all_keys):
+            required = required_by_shift_skill.get((shift_key, skill_key), 0)
+
+            covered = 0
+            candidate_ids = []
+            if shift_key in shift_display_map:
+                base_identifier = shift_display_map[shift_key]
+                candidate_ids.extend([base_identifier, str(base_identifier)])
+            candidate_ids.extend([shift_key, str(shift_key)])
+
+            seen_candidates: set[object] = set()
+            for candidate in candidate_ids:
+                if candidate in seen_candidates:
+                    continue
+                seen_candidates.add(candidate)
+                vars_with_emp = self._vars_by_shift_emp.get(candidate, [])
+                if not vars_with_emp and isinstance(candidate, str):
+                    vars_with_emp = self._vars_by_shift_emp.get(candidate.strip(), [])
+                if not vars_with_emp and candidate != str(candidate):
+                    vars_with_emp = self._vars_by_shift_emp.get(str(candidate), [])
+                if not vars_with_emp:
+                    continue
                 for emp_id, var in vars_with_emp:
-                    if skill_name in self.emp_skills.get(emp_id, set()):
+                    if skill_key in self.emp_skills.get(str(emp_id), set()):
                         covered += int(solver.Value(var))
 
-                shift_key = str(shift_id)
-                skill_key = str(skill_name)
-                dict_key = (shift_key, skill_key)
-
-                shortfall = 0
-                if dict_key in segment_shortfall_minutes:
-                    total_minutes = segment_shortfall_minutes[dict_key]
-                    duration = self.duration_minutes.get(shift_id)
-                    if duration is None:
-                        duration = self.duration_minutes.get(shift_key)
-                    if duration is None:
-                        duration = 0
-                    duration_int = max(1, int(duration))
-                    if total_minutes > 0:
-                        shortfall = int(math.ceil(total_minutes / duration_int))
-                elif dict_key in slot_shortfall_totals:
-                    shortfall = slot_shortfall_totals[dict_key]
-                else:
-                    fallback_var = skill_shortfall_vars.get((shift_id, skill_name))
-                    if fallback_var is None and (shift_id, skill_name) != dict_key:
-                        fallback_var = skill_shortfall_vars.get(dict_key)
-                    if fallback_var is None and (shift_id, skill_name) != (shift_key, skill_name):
-                        fallback_var = skill_shortfall_vars.get((shift_key, skill_name))
-                    if fallback_var is None and (shift_id, skill_name) != (shift_id, skill_key):
-                        fallback_var = skill_shortfall_vars.get((shift_id, skill_key))
+            shortfall = 0
+            if (shift_key, skill_key) in segment_shortfall_minutes:
+                total_minutes = segment_shortfall_minutes[(shift_key, skill_key)]
+                duration_int = _get_shift_duration(shift_key)
+                if total_minutes > 0:
+                    shortfall = int(math.ceil(total_minutes / duration_int))
+            elif (shift_key, skill_key) in slot_shortfall_totals:
+                shortfall = slot_shortfall_totals[(shift_key, skill_key)]
+            else:
+                fallback_var = None
+                candidate_pairs = []
+                for candidate in candidate_ids:
+                    candidate_pairs.append((candidate, skill_key))
+                    candidate_pairs.append((candidate, str(skill_key)))
+                for candidate_shift, candidate_skill in candidate_pairs:
+                    fallback_var = skill_shortfall_vars.get((candidate_shift, candidate_skill))
                     if fallback_var is not None:
-                        shortfall = int(solver.Value(fallback_var))
+                        break
+                if fallback_var is not None:
+                    shortfall = int(solver.Value(fallback_var))
 
-                rows.append(
-                    {
-                        "shift_id": shift_id,
-                        "skill": skill_name,
-                        "required": int(required),
-                        "covered": covered,
-                        "shortfall": shortfall,
-                    }
-                )
+            display_shift = shift_display_map.get(shift_key, shift_key)
+
+            rows.append(
+                {
+                    "shift_id": display_shift,
+                    "skill": skill_key,
+                    "required": int(required),
+                    "covered": int(covered),
+                    "shortfall": int(shortfall),
+                }
+            )
 
         if not rows:
             return pd.DataFrame(columns=columns)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import math
 import numpy as np
 import pandas as pd
 import pytest
@@ -440,6 +441,71 @@ def test_skill_coverage_report_uses_segment_shortfalls(sample_environment, tmp_p
     saved_df = pd.read_csv(output_path)
     saved_row = saved_df[
         (saved_df["shift_id"] == shift_id_str) & (saved_df["skill"] == skill_name)
+    ]
+    assert not saved_row.empty
+    assert saved_row.iloc[0]["shortfall"] == expected_shortfall
+
+
+def test_skill_coverage_report_segment_only_requirements(sample_environment, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    solver = sample_environment.solver
+
+    solver.shift_skill_requirements = {}
+    solver.slot_skill_shortfall_vars = {}
+    solver.skill_shortfall_vars = {}
+
+    assert solver.segment_skill_shortfall_vars, "expected segment skill shortfall variables"
+    assert solver.segment_skill_demands, "expected segment skill demands"
+
+    (segment_id, skill_name), segment_var = next(iter(solver.segment_skill_shortfall_vars.items()))
+
+    shift_id = None
+    for candidate_shift, segments in solver.shift_to_covering_segments.items():
+        if segment_id in segments:
+            shift_id = candidate_shift
+            break
+    if shift_id is None and isinstance(segment_id, str) and "__" in segment_id:
+        shift_id = segment_id.split("__", 1)[0]
+    if shift_id is None:
+        shift_id = segment_id
+
+    shift_id_str = str(shift_id)
+
+    duration = solver.duration_minutes.get(shift_id)
+    if duration is None:
+        duration = solver.duration_minutes.get(shift_id_str)
+    duration = max(1, int(duration or 0))
+
+    shortfall_minutes = duration
+    overrides = {segment_var: shortfall_minutes}
+    cp_solver = DelegatingCpSolver(sample_environment.cp_solver, overrides)
+
+    coverage_df = solver.extract_skill_coverage_summary(cp_solver)
+    assert not coverage_df.empty
+
+    row = coverage_df[
+        (coverage_df["shift_id"].astype(str) == shift_id_str)
+        & (coverage_df["skill"] == str(skill_name))
+    ]
+    assert not row.empty
+
+    demand_minutes = solver.segment_skill_demands.get((segment_id, skill_name), 0)
+    expected_required = int(math.ceil(demand_minutes / duration)) if demand_minutes else 0
+    expected_shortfall = int(math.ceil(shortfall_minutes / duration))
+
+    assert row.iloc[0]["required"] == expected_required
+    assert row.iloc[0]["shortfall"] == expected_shortfall
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "skill_coverage_report.csv"
+    coverage_df.to_csv(output_path, index=False)
+
+    saved_df = pd.read_csv(output_path)
+    saved_row = saved_df[
+        (saved_df["shift_id"].astype(str) == shift_id_str)
+        & (saved_df["skill"] == str(skill_name))
     ]
     assert not saved_row.empty
     assert saved_row.iloc[0]["shortfall"] == expected_shortfall
