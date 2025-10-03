@@ -1970,6 +1970,7 @@ def _load_data(
     dict[str, int],  # window_duration_map
     dict[str, dict[str, int]],  # window_skill_requirements
     precompute.AdaptiveSlotData | None,  # adaptive_slot_data
+    pd.DataFrame,  # windows_df
 ]:
     employees = loader.load_employees(data_dir / "employees.csv")
     shifts = loader.load_shifts(data_dir / "shifts.csv", max_daily_hours=getattr(cfg.hours, "max_daily", None))
@@ -2087,6 +2088,7 @@ def _load_data(
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     )
 
 
@@ -2180,6 +2182,7 @@ def main(argv: list[str] | None = None) -> int:
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     ) = _load_data(args.data_dir, solver_cfg.global_min_rest_hours, cfg)
 
     skill_emp_with_tags = sum(1 for skills in emp_skills.values() if skills)
@@ -2246,8 +2249,6 @@ def main(argv: list[str] | None = None) -> int:
     report_dir = Path("reports")
     report_dir.mkdir(parents=True, exist_ok=True)
     
-    reporter = reporting.ScheduleReporter(solver, cp_solver)
-
     # Salvataggio delle assegnazioni
     assignments_df = solver.extract_assignments(cp_solver)
     if args.output is not None:
@@ -2258,6 +2259,13 @@ def main(argv: list[str] | None = None) -> int:
     elif not assignments_df.empty:
         print("Assegnazioni attive (prime 10 righe):")
         print(assignments_df.head(10).to_string(index=False))
+
+    reporter = reporting.ScheduleReporter(
+        solver,
+        cp_solver,
+        assignments_df=assignments_df,
+        windows_df=windows_df,
+    )
 
     # Generazione report CSV
     reporter.generate_segment_coverage_report()

@@ -39,6 +39,7 @@ def test_e2e_solver_runs_on_repository_data():
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     ) = model_cp._load_data(DATA_DIR, cfg.rest.min_between_shifts, cfg)
 
     penalties = {

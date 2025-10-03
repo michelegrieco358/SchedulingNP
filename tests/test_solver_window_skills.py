@@ -70,6 +70,7 @@ def test_solver_excludes_unskilled_workers(sample_environment):
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
 
     objective_priority = list(cfg.objective.priority)
@@ -173,6 +174,7 @@ def test_shift_skill_requirements_parsed_from_string(sample_environment):
         window_duration_map,
         window_skill_req,
         adaptive_data,
+        windows_df,
     ) = model_cp._load_data(data_dir, cfg.rest.min_between_shifts, cfg)
 
     assert shift_skill_req == {"S1": {"skillA": 1}}
