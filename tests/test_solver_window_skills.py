@@ -105,6 +105,7 @@ def test_solver_excludes_unskilled_workers(sample_environment):
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(
@@ -211,6 +212,7 @@ def test_shift_skill_requirements_parsed_from_string(sample_environment):
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(
