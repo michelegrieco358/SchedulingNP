@@ -111,3 +111,22 @@ def test_coverage_source_shifts_uses_shift_requirement(tmp_path: Path) -> None:
     assert env.solver.shortfall_vars
     assert env.adaptive_data is None
 
+
+def test_solver_lex_mode_skips_zero_weight(tmp_path: Path) -> None:
+    data_dir = _build_dataset(tmp_path)
+
+    default_env = build_solver_from_data(data_dir, config_loader.Config())
+    default_keys = [key for key, _ in default_env.solver._collect_lex_stages()]
+    assert "unmet_window" in default_keys
+
+    cfg = config_loader.Config()
+    cfg.objective.mode = "lex"
+    cfg.penalties.unmet_window = 0.0
+
+    env = build_solver_from_data(data_dir, cfg)
+
+    assert env.solver.objective_mode == "lex"
+    stage_keys = [key for key, _ in env.solver._collect_lex_stages()]
+    assert stage_keys, "lex mode should still optimize at least one objective"
+    assert "unmet_window" not in stage_keys
+

@@ -103,6 +103,7 @@ class SolverConfig:
     mip_gap: float | None = None
     skills_slack_enabled: bool = True
     objective_priority: tuple[str, ...] = DEFAULT_OBJECTIVE_PRIORITY
+    objective_mode: str = "weighted"
 
 
 class ShiftSchedulingCpSolver:
@@ -134,6 +135,11 @@ class ShiftSchedulingCpSolver:
         self.overtime_costs = overtime_costs
         self.preferences = preferences
         self.config = config or SolverConfig()
+        mode_value = str(getattr(self.config, "objective_mode", "weighted")).strip().lower()
+        if mode_value not in {"weighted", "lex"}:
+            mode_value = "weighted"
+        self.config.objective_mode = mode_value
+        self.objective_mode = mode_value
         self.global_hours = global_hours
         self.global_min_weekly = float(getattr(global_hours, "min_weekly", 0.0)) if global_hours is not None else 0.0
         max_weekly_value = getattr(global_hours, "max_weekly", None) if global_hours is not None else None
@@ -260,6 +266,7 @@ class ShiftSchedulingCpSolver:
         self.config.fairness_weight = base_weights.get("fairness", self.config.fairness_weight)
         self.config.skills_slack_enabled = bool(self.config.skills_slack_enabled)
         self.config.objective_priority = tuple(priority)
+        self._objective_priority_map: dict[str, tuple[cp_model.LinearExpr, bool]] | None = None
 
         self.model = cp_model.CpModel()
         self.assignment_vars: Dict[Tuple[str, str], cp_model.IntVar] = {}
@@ -331,6 +338,7 @@ class ShiftSchedulingCpSolver:
 
     def build(self) -> None:
         """Costruisce variabili e vincoli base (placeholder)."""
+        self._objective_priority_map = None
         self._build_assignment_variables()
         self._build_shift_aggregate_variables()
         # Copertura su turni attiva solo quando non usiamo la domanda per finestre
@@ -1384,7 +1392,11 @@ class ShiftSchedulingCpSolver:
             return 0, False
         return sum(terms), True
 
-    def _set_objective(self) -> None:
+    def _assemble_objective_priority_map(self) -> dict[str, tuple[cp_model.LinearExpr, bool]]:
+        """Costruisce e memorizza le espressioni disponibili per ogni obiettivo."""
+        if self._objective_priority_map is not None:
+            return self._objective_priority_map
+
         window_expr, has_window = self._compute_window_shortfall_expr()
         shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
         skill_expr, has_skill = self._compute_skill_shortfall_expr()
@@ -1394,8 +1406,6 @@ class ShiftSchedulingCpSolver:
         external_expr, has_external = self._compute_external_usage_expr()
         pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
-
-        # NUOVO: Termini per segmenti con turni interi (se preserve_shift_integrity=True)
         segment_expr, has_segment = self._compute_segment_shortfall_expr()
 
         priority_map = {
@@ -1409,14 +1419,18 @@ class ShiftSchedulingCpSolver:
             "fairness": (fairness_expr, has_fairness),
         }
 
-        # Usa sempre i segmenti per unmet_window (modalitÃƒÂ  unica)
         if has_segment:
             priority_map["unmet_window"] = (segment_expr, has_segment)
         if has_segment_skill:
             priority_map["unmet_skill"] = (segment_skill_expr, has_segment_skill)
 
+        self._objective_priority_map = priority_map
+        return priority_map
 
-        terms = []
+    def _set_objective(self) -> None:
+        priority_map = self._assemble_objective_priority_map()
+
+        terms: list[cp_model.LinearExpr] = []
         for key in self.objective_priority:
             expr, available = priority_map.get(key, (0, False))
             weight = self.objective_weights.get(key, 0)
@@ -1428,6 +1442,18 @@ class ShiftSchedulingCpSolver:
             return
 
         self.model.Minimize(sum(terms))
+
+    def _collect_lex_stages(self) -> list[tuple[str, cp_model.LinearExpr]]:
+        """Restituisce la sequenza (chiave, espressione) per ottimizzazione lessicografica."""
+        priority_map = self._assemble_objective_priority_map()
+        stages: list[tuple[str, cp_model.LinearExpr]] = []
+        for key in self.objective_priority:
+            expr, available = priority_map.get(key, (0, False))
+            weight = self.objective_weights.get(key, 0)
+            if not available or not weight:
+                continue
+            stages.append((key, expr))
+        return stages
 
     def _add_min_rest_constraints(self) -> None:
         """Impedisce che un dipendente prenda due turni troppo ravvicinati."""
@@ -1483,6 +1509,9 @@ class ShiftSchedulingCpSolver:
 
     def solve(self) -> cp_model.CpSolver:
         """Esegue la risoluzione CP-SAT."""
+        if self.objective_mode == "lex":
+            return self._solve_lex()
+
         solver = cp_model.CpSolver()
         if self.config.max_seconds is not None:
             solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
@@ -1494,6 +1523,81 @@ class ShiftSchedulingCpSolver:
 
         solver.Solve(self.model)
         return solver
+
+    def _solve_lex(self) -> cp_model.CpSolver:
+        """Risoluzione lessicografica pura tramite passaggi successivi."""
+        stages = self._collect_lex_stages()
+        if not stages:
+            solver = cp_model.CpSolver()
+            if self.config.max_seconds is not None:
+                solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
+            solver.parameters.log_search_progress = self.config.log_search_progress
+            if self.random_seed is not None:
+                solver.parameters.random_seed = int(self.random_seed)
+            if self.mip_gap is not None:
+                solver.parameters.relative_gap_limit = float(self.mip_gap)
+            solver.Solve(self.model)
+            return solver
+
+        total_limit = float(self.config.max_seconds) if self.config.max_seconds else None
+        per_stage = None
+        if total_limit and total_limit > 0:
+            per_stage = max(1.0, total_limit / len(stages))
+
+        clear_hints = getattr(self.model, "ClearHints", None)
+        if callable(clear_hints):
+            clear_hints()
+
+        last_solver: cp_model.CpSolver | None = None
+        solver: cp_model.CpSolver | None = None
+
+        for index, (key, expr) in enumerate(stages, start=1):
+            self.model.Minimize(expr)
+
+            solver = cp_model.CpSolver()
+            if per_stage is not None:
+                solver.parameters.max_time_in_seconds = float(per_stage)
+            elif self.config.max_seconds is not None:
+                solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
+            solver.parameters.log_search_progress = self.config.log_search_progress
+            if self.random_seed is not None:
+                solver.parameters.random_seed = int(self.random_seed)
+            if self.mip_gap is not None:
+                solver.parameters.relative_gap_limit = float(self.mip_gap)
+
+            if last_solver is not None and self.assignment_vars:
+                if callable(clear_hints):
+                    clear_hints()
+                for var in self.assignment_vars.values():
+                    try:
+                        hint_val = last_solver.Value(var)
+                    except Exception:
+                        continue
+                    self.model.AddHint(var, hint_val)
+
+            status = solver.Solve(self.model)
+            if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                return solver
+
+            best_val = solver.ObjectiveValue()
+            try:
+                best_int = int(round(best_val))
+            except (TypeError, ValueError):
+                best_int = None
+            if best_int is not None:
+                self.model.Add(expr <= best_int)
+
+            last_solver = solver
+            logger.debug(
+                "Lexicographic stage %d/%d (%s): objective=%s",
+                index,
+                len(stages),
+                key,
+                best_val,
+            )
+
+        assert solver is not None
+        return last_solver if last_solver is not None else solver
 
     def extract_assignments(self, solver: cp_model.CpSolver) -> pd.DataFrame:
         """Costruisce un DataFrame con le assegnazioni attive nel modello risolto."""
@@ -2155,6 +2259,7 @@ def main(argv: list[str] | None = None) -> int:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     summary = {
@@ -2165,6 +2270,7 @@ def main(argv: list[str] | None = None) -> int:
         "solver_mip_gap": cfg.solver.mip_gap,
         "random_seed": cfg.random.seed,
         "skills_slack_enabled": cfg.skills.enable_slack,
+        "objective_mode": cfg.objective.mode,
     }
     logger.info("Configurazione risolta: %s", summary)
 
