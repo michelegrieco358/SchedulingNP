@@ -125,6 +125,55 @@ class DummyCpSolver:
         return self._values.get(var, 0)
 
 
+def test_extract_shortfall_summary_prefers_slot_vars(sample_environment, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    solver = sample_environment.solver
+
+    assert solver.shift_to_covering_segments, "expected at least one shift with covering segments"
+    shift_id, segments = next(iter(solver.shift_to_covering_segments.items()))
+    assert segments, "expected segments mapped to the shift"
+
+    base_segment = segments[0]
+    extra_segment = f"{base_segment}__extra"
+
+    slot_var_a = object()
+    slot_var_b = object()
+    legacy_var = object()
+
+    solver.slot_shortfall_vars = {base_segment: slot_var_a, extra_segment: slot_var_b}
+    solver.shortfall_vars = {shift_id: legacy_var}
+
+    if hasattr(solver, "adaptive_slot_data") and solver.adaptive_slot_data is not None:
+        segment_owner = getattr(solver.adaptive_slot_data, "segment_owner", {})
+        segment_owner[base_segment] = shift_id
+        segment_owner[extra_segment] = shift_id
+
+    solver.shift_to_covering_segments.setdefault(shift_id, []).append(extra_segment)
+
+    cp_solver = DummyCpSolver({slot_var_a: 2, slot_var_b: 1, legacy_var: 99})
+
+    shortfall_df = solver.extract_shortfall_summary(cp_solver)
+    expected_units = 3
+    expected_minutes = expected_units * solver.duration_minutes.get(shift_id, 0)
+
+    assert shortfall_df.to_dict("records") == [
+        {
+            "shift_id": shift_id,
+            "shortfall_units": expected_units,
+            "shortfall_staff_minutes": expected_minutes,
+        }
+    ]
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = report_dir / "shortfall_report.csv"
+    shortfall_df.to_csv(output_path, index=False)
+
+    saved_df = pd.read_csv(output_path)
+    pd.testing.assert_frame_equal(saved_df, shortfall_df)
+
+
 def test_constraint_report_prefers_slot_shortfalls(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
