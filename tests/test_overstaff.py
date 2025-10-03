@@ -127,6 +127,7 @@ def test_shift_overstaff_penalty(tmp_path: Path) -> None:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(
@@ -223,6 +224,7 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     solver = model_cp.ShiftSchedulingCpSolver(
@@ -251,11 +253,11 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
     cp_solver = solver.solve()
     assert cp_solver.StatusName() == 'OPTIMAL'
 
-    assert solver.segment_overstaff_vars, 'segment overstaff vars should exist'
-    seg_id, seg_var = next(iter(solver.segment_overstaff_vars.items()))
-    overstaff_value = cp_solver.Value(seg_var)
-    segment_duration = solver._get_segment_duration_minutes(seg_id)
-    assert overstaff_value == segment_duration
+    assert solver.slot_overstaff_vars, 'slot overstaff vars should exist'
+    slot_id, slot_var = next(iter(solver.slot_overstaff_vars.items()))
+    overstaff_value = cp_solver.Value(slot_var)
+    slot_duration = solver._get_slot_duration_minutes(slot_id)
+    assert overstaff_value == slot_duration
 
     if solver.shift_overstaff_vars:
         for var in solver.shift_overstaff_vars.values():
@@ -266,6 +268,6 @@ def test_window_segment_overstaff_penalty(tmp_path: Path) -> None:
 
     breakdown = solver.extract_objective_breakdown(cp_solver)
     overstaff_metrics = breakdown['overstaff']
-    assert overstaff_metrics['minutes'] == segment_duration
-    expected_cost = segment_duration * solver.objective_weights_minutes.get('overstaff', 0.0)
+    assert overstaff_metrics['minutes'] == slot_duration
+    expected_cost = slot_duration * solver.objective_weights_minutes.get('overstaff', 0.0)
     assert overstaff_metrics['cost'] == pytest.approx(expected_cost)

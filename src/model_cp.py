@@ -103,6 +103,7 @@ class SolverConfig:
     mip_gap: float | None = None
     skills_slack_enabled: bool = True
     objective_priority: tuple[str, ...] = DEFAULT_OBJECTIVE_PRIORITY
+    objective_mode: str = "weighted"
 
 
 class ShiftSchedulingCpSolver:
@@ -134,6 +135,11 @@ class ShiftSchedulingCpSolver:
         self.overtime_costs = overtime_costs
         self.preferences = preferences
         self.config = config or SolverConfig()
+        mode_value = str(getattr(self.config, "objective_mode", "weighted")).strip().lower()
+        if mode_value not in {"weighted", "lex"}:
+            mode_value = "weighted"
+        self.config.objective_mode = mode_value
+        self.objective_mode = mode_value
         self.global_hours = global_hours
         self.global_min_weekly = float(getattr(global_hours, "min_weekly", 0.0)) if global_hours is not None else 0.0
         max_weekly_value = getattr(global_hours, "max_weekly", None) if global_hours is not None else None
@@ -260,6 +266,7 @@ class ShiftSchedulingCpSolver:
         self.config.fairness_weight = base_weights.get("fairness", self.config.fairness_weight)
         self.config.skills_slack_enabled = bool(self.config.skills_slack_enabled)
         self.config.objective_priority = tuple(priority)
+        self._objective_priority_map: dict[str, tuple[cp_model.LinearExpr, bool]] | None = None
 
         self.model = cp_model.CpModel()
         self.assignment_vars: Dict[Tuple[str, str], cp_model.IntVar] = {}
@@ -274,7 +281,6 @@ class ShiftSchedulingCpSolver:
         self.shift_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.window_shortfall_vars: dict[str, cp_model.IntVar] = {}
         self.window_overstaff_vars: dict[str, cp_model.IntVar] = {}
-        self.segment_overstaff_vars: dict[str, cp_model.IntVar] = {}
         self.skill_shortfall_vars: dict[Tuple[str, str], cp_model.IntVar] = {}
         self.overtime_vars: dict[str, cp_model.IntVar] = {}
         self.overtime_cost_weights: dict[str, int] = {}
@@ -318,12 +324,14 @@ class ShiftSchedulingCpSolver:
         # ModalitÃƒÂ  interpretazione domanda
         self.demand_mode = "headcount"  # Default, sarÃƒÂ  aggiornato dal config
         
-        # Variabili per vincoli di segmenti con turni interi
-        self.segment_shortfall_vars: dict[str, cp_model.IntVar] = {}  # short_segment[seg_id]
-        self.shift_to_covering_segments: dict[str, list[str]] = {}  # Mappa turno -> segmenti che copre
-        self.segment_demands: dict[str, int] = {}  # Domanda per segmento (headcount o persona-minuti)
-        self.segment_skill_demands: dict[tuple[str, str], int] = {}  # Domanda skill per segmento
-        self.segment_skill_shortfall_vars: dict[tuple[str, str], cp_model.IntVar] = {}
+        # Variabili per vincoli di copertura sugli slot temporali
+        self.slot_shortfall_vars: dict[str, cp_model.IntVar] = {}
+        self.slot_overstaff_vars: dict[str, cp_model.IntVar] = {}
+        self.shift_to_covering_slots: dict[str, list[str]] = {}
+        self.slot_to_covering_shifts: dict[str, list[str]] = {}
+        self.slot_demands: dict[str, int] = {}
+        self.slot_skill_demands: dict[tuple[str, str], int] = {}
+        self.slot_skill_shortfall_vars: dict[tuple[str, str], cp_model.IntVar] = {}
 
         # Pesi obiettivo in persona-minuti (conversione da persona-ora)
         self.objective_weights_minutes: dict[str, float] = {}
@@ -331,6 +339,7 @@ class ShiftSchedulingCpSolver:
 
     def build(self) -> None:
         """Costruisce variabili e vincoli base (placeholder)."""
+        self._objective_priority_map = None
         self._build_assignment_variables()
         self._build_shift_aggregate_variables()
         # Copertura su turni attiva solo quando non usiamo la domanda per finestre
@@ -347,8 +356,8 @@ class ShiftSchedulingCpSolver:
         # MODALITÃƒâ‚¬ UNICA: sempre turni interi con segmentazione
         # - Usa solo vincoli basati su segmenti temporali
         # - Ottimizza sui turni interi per coprire la domanda di ogni segmento
-        self._add_segment_coverage_constraints()
-        self._add_segment_skill_constraints()
+        self._add_slot_coverage_constraints()
+        self._add_slot_skill_constraints()
         self.duration_minutes = self._compute_shift_duration_minutes()
         if self.duration_minutes:
             avg_minutes = sum(self.duration_minutes.values()) / len(self.duration_minutes)
@@ -466,83 +475,60 @@ class ShiftSchedulingCpSolver:
                     self.model.Add(assign_expr >= req)
 
 
-    def _add_segment_coverage_constraints(self) -> None:
-        """
-        NUOVO: Implementa vincoli di copertura per segmenti con turni interi.
-
-        Quando preserve_shift_integrity=True, questo metodo:
-        1. Mantiene la segmentazione temporale per calcolare la domanda
-        2. Ma usa solo variabili aggregate y[s] dei turni interi
-        3. Ogni turno copre TUTTI i segmenti nel suo intervallo temporale
-        
-        Formulazione matematica:
-        - Per ogni segmento s: Ã¢Ë†â€˜_{turni i che coprono s} a_{i,s} * y[i] >= d_s
-        - Dove a_{i,s} = capacitÃƒÂ  fornita dal turno i nel segmento s (persona-minuti)
-        - E d_s = domanda richiesta nel segmento s (persona-minuti)
-        """
-        self.segment_shortfall_vars = {}
-        self.segment_overstaff_vars = {}
+    def _add_slot_coverage_constraints(self) -> None:
+        """Imposta i vincoli di copertura direttamente sugli slot temporali."""
+        self.slot_shortfall_vars = {}
+        self.slot_overstaff_vars = {}
 
         has_window_demand = any(val > 0 for val in (self.window_demands or {}).values())
 
-        # Solo se abbiamo dati di segmentazione
         if not self.adaptive_slot_data:
             if self.using_window_demands and has_window_demand:
                 raise RuntimeError(
-                    "Modalita domanda per finestra attiva ma dati di segmentazione assenti. "
+                    "Modalità domanda per finestra attiva ma dati di segmentazione assenti. "
                     "Verifica windows.csv e gli avvisi generati dal precompute."
                 )
-            logger.info("Vincoli segmenti con turni interi: nessun dato di segmentazione disponibile")
+            logger.info("Vincoli slot: nessun dato di segmentazione disponibile")
             return
 
-        # Precomputa mappature turno -> segmenti e domande per segmento
-        self._precompute_shift_to_segments_mapping()
-        self._compute_segment_demands()
+        self._precompute_shift_to_slot_mapping()
+        self._compute_slot_demands()
 
-        if not self.segment_demands:
+        if not self.slot_demands:
             if self.using_window_demands and has_window_demand:
                 raise RuntimeError(
-                    "Modalita domanda per finestra attiva ma nessuna domanda di segmento calcolata. "
+                    "Modalità domanda per finestra attiva ma nessuna domanda di slot calcolata. "
                     "Controlla che le finestre siano mappate correttamente agli slot (ruoli/orari validi)."
                 )
-            logger.info("Vincoli segmenti con turni interi: nessuna domanda di segmento calcolata")
+            logger.info("Vincoli slot: nessuna domanda calcolata")
             return
 
-        segment_count = 0
         constraint_count = 0
-
-        for segment_id, demand_person_minutes in self.segment_demands.items():
-            if demand_person_minutes < 0:
+        for slot_id, demand_person_minutes in self.slot_demands.items():
+            if demand_person_minutes <= 0:
                 continue
 
-            segment_duration = self._get_segment_duration_minutes(segment_id)
-            if segment_duration <= 0:
+            slot_duration = self._get_slot_duration_minutes(slot_id)
+            if slot_duration <= 0:
                 continue
 
-            segment_count += 1
-
-            covering_shifts: list[str] = []
-            for shift_id, segments in self.shift_to_covering_segments.items():
-                if segment_id in segments:
-                    covering_shifts.append(shift_id)
-
-            covering_terms = []
+            covering_terms: list[cp_model.LinearExpr] = []
             capacity_bound = 0
-            for shift_id in covering_shifts:
+            for shift_id in self.slot_to_covering_shifts.get(slot_id, []):
                 y_var = self.shift_aggregate_vars.get(shift_id)
                 if y_var is None:
                     continue
-                covering_terms.append(segment_duration * y_var)
+                covering_terms.append(slot_duration * y_var)
                 eligible = len(self._vars_by_shift.get(shift_id, []))
                 if eligible > 0:
-                    capacity_bound += segment_duration * eligible
+                    capacity_bound += slot_duration * eligible
 
-            slack_var = self.model.NewIntVar(0, max(0, int(demand_person_minutes)), f"short_segment__{segment_id}")
-            self.segment_shortfall_vars[segment_id] = slack_var
+            slack_var = self.model.NewIntVar(0, int(demand_person_minutes), f"short_slot__{slot_id}")
+            self.slot_shortfall_vars[slot_id] = slack_var
 
             overstaff_ub = max(0, capacity_bound)
-            overstaff_var = self.model.NewIntVar(0, overstaff_ub, f"overstaff_segment__{segment_id}")
-            self.segment_overstaff_vars[segment_id] = overstaff_var
+            overstaff_var = self.model.NewIntVar(0, overstaff_ub, f"overstaff_slot__{slot_id}")
+            self.slot_overstaff_vars[slot_id] = overstaff_var
 
             if covering_terms:
                 self.model.Add(sum(covering_terms) + slack_var == demand_person_minutes + overstaff_var)
@@ -550,297 +536,219 @@ class ShiftSchedulingCpSolver:
                 self.model.Add(slack_var == demand_person_minutes)
 
             constraint_count += 1
-        
-        if segment_count > 0:
-            logger.info(
-                "Vincoli segmenti con turni interi: %d segmenti, %d vincoli (preserve_shift_integrity=True)",
-                segment_count,
-                constraint_count
-            )
-        else:
-            logger.info("Vincoli segmenti con turni interi: nessun segmento con domanda trovato")
 
-    def _add_segment_skill_constraints(self) -> None:
-        """Vincoli skill su segmenti quando le skill sono definite nelle windows."""
-        self.segment_skill_shortfall_vars = {}
+        logger.info("Vincoli slot: %d vincoli generati", constraint_count)
+
+    def _add_slot_skill_constraints(self) -> None:
+        """Vincoli di skill calcolati sugli slot temporali."""
+        self.slot_skill_shortfall_vars = {}
 
         if not self.using_window_skills:
             return
         if not self.adaptive_slot_data:
             return
 
-        if not self.segment_skill_demands:
-            self._compute_segment_skill_demands()
-        if not self.segment_skill_demands:
+        if not self.slot_skill_demands:
+            self._compute_slot_skill_demands()
+        if not self.slot_skill_demands:
             return
 
-        if not self.shift_to_covering_segments:
-            self._precompute_shift_to_segments_mapping()
+        if not self.shift_to_covering_slots:
+            self._precompute_shift_to_slot_mapping()
 
-        for (segment_id, skill_name), demand_minutes in self.segment_skill_demands.items():
+        for (slot_id, skill_name), demand_minutes in self.slot_skill_demands.items():
             if demand_minutes <= 0:
                 continue
 
-            segment_duration = self._get_segment_duration_minutes(segment_id)
-            if segment_duration <= 0:
+            slot_duration = self._get_slot_duration_minutes(slot_id)
+            if slot_duration <= 0:
                 continue
 
-            covering_terms = []
-            for shift_id, segments in self.shift_to_covering_segments.items():
-                if segment_id not in segments:
-                    continue
+            covering_terms: list[cp_model.LinearExpr] = []
+            for shift_id in self.slot_to_covering_shifts.get(slot_id, []):
                 vars_with_emp = self._vars_by_shift_emp.get(shift_id, [])
                 eligible = [var for emp_id, var in vars_with_emp if skill_name in self.emp_skills.get(emp_id, set())]
                 if not eligible:
                     continue
-                covering_terms.append(segment_duration * sum(eligible))
+                covering_terms.append(slot_duration * sum(eligible))
 
             safe_skill = ''.join(ch if ch.isalnum() or ch == '_' else '_' for ch in skill_name)
-            slack_var = self.model.NewIntVar(0, demand_minutes, f"short_segment_skill__{segment_id}__{safe_skill}")
-            self.segment_skill_shortfall_vars[(segment_id, skill_name)] = slack_var
+            slack_var = self.model.NewIntVar(0, demand_minutes, f"short_slot_skill__{slot_id}__{safe_skill}")
+            self.slot_skill_shortfall_vars[(slot_id, skill_name)] = slack_var
 
             if covering_terms:
                 self.model.Add(sum(covering_terms) + slack_var >= demand_minutes)
             else:
                 self.model.Add(slack_var >= demand_minutes)
 
-    def _precompute_shift_to_segments_mapping(self) -> None:
-        """Precomputa mappa turno -> segmenti che copre."""
-        self.shift_to_covering_segments = {}
-        
+    def _precompute_shift_to_slot_mapping(self) -> None:
+        """Costruisce le mappe turno→slot e slot→turni."""
+        self.shift_to_covering_slots = {}
+        self.slot_to_covering_shifts = {}
+
         if not self.adaptive_slot_data:
             return
-            
-        try:
-            segments_of_s = getattr(self.adaptive_slot_data, 'segments_of_s', {})
-            
-            # Per ogni turno, ottieni la lista dei segmenti che copre
-            for shift_id in self.shift_aggregate_vars.keys():
-                segments = segments_of_s.get(str(shift_id), [])
-                self.shift_to_covering_segments[shift_id] = list(segments)
-                
-        except AttributeError as e:
-            logger.warning("Errore nell'accesso ai segmenti per turno: %s", e)
-            # Fallback: nessun turno copre alcun segmento
-            for shift_id in self.shift_aggregate_vars.keys():
-                self.shift_to_covering_segments[shift_id] = []
 
-    def _compute_segment_demands(self) -> None:
-        """
-        Calcola la domanda per ogni segmento basata su intersezioni reali con le finestre.
-        
-        Due modalità  supportate:
-        - "headcount": domanda = somma tra le domande delle finestre che intersecano il segmento
-        - "person_minutes": domanda = somma proporzionale dei contributi delle finestre intersecanti
-        """
-        self.segment_demands = {}
-        
+        try:
+            segments_of_s = getattr(self.adaptive_slot_data, "segments_of_s", {}) or {}
+            cover_segment = getattr(self.adaptive_slot_data, "cover_segment", {}) or {}
+            segment_to_slots: dict[str, list[str]] = {}
+            for (segment_id, slot_id), covers in cover_segment.items():
+                if covers:
+                    segment_to_slots.setdefault(segment_id, []).append(slot_id)
+
+            for raw_shift_id in self.shift_aggregate_vars.keys():
+                shift_id = str(raw_shift_id)
+                slots: set[str] = set()
+                for segment_id in segments_of_s.get(shift_id, []):
+                    slots.update(segment_to_slots.get(segment_id, []))
+                ordered = sorted(slots)
+                self.shift_to_covering_slots[shift_id] = ordered
+                for slot_id in ordered:
+                    self.slot_to_covering_shifts.setdefault(slot_id, []).append(shift_id)
+
+        except AttributeError as exc:
+            logger.warning("Errore nell'accesso ai dati di segmentazione: %s", exc)
+            for raw_shift_id in self.shift_aggregate_vars.keys():
+                shift_id = str(raw_shift_id)
+                self.shift_to_covering_slots[shift_id] = []
+
+    def _compute_slot_demands(self) -> None:
+        """Calcola la domanda per ciascuno slot in persona-minuti."""
+        self.slot_demands = {}
+
         if not self.adaptive_slot_data or not self.window_demands:
             return
-        slot_windows = {}
-        if self.adaptive_slot_data is not None:
-            segment_bounds = {}
-            segment_bounds = getattr(self.adaptive_slot_data, "segment_bounds", {}) or {}
-            slot_windows = getattr(self.adaptive_slot_data, "slot_windows", {}) or {}
 
-        if not segment_bounds:
-            logger.info("Calcolo domande segmenti: segment_bounds mancante, esco")
+        slot_bounds = getattr(self.adaptive_slot_data, "slot_bounds", {}) or {}
+        if not slot_bounds:
+            logger.info("Calcolo domande slot: slot_bounds mancante, esco")
             return
 
-        raw_slot_windows = slot_windows or self.slot_windows or {}
-        segment_to_windows: dict[str, list[tuple[str, int]]] = {}
-        if raw_slot_windows:
-            cover_map = getattr(self.adaptive_slot_data, "cover_segment", {}) or {}
-            for (segment_id, slot_id), covers in cover_map.items():
-                if not covers:
-                    continue
-                for win_info in raw_slot_windows.get(slot_id, []):
-                    segment_to_windows.setdefault(segment_id, []).append(win_info)
-            if not segment_to_windows and isinstance(raw_slot_windows, dict):
-                segment_to_windows = raw_slot_windows  # fallback legacy mapping
+        slot_windows = getattr(self.adaptive_slot_data, "slot_windows", {}) or self.slot_windows or {}
 
-        if not segment_to_windows:
-            logger.info("Calcolo domande segmenti: mapping segmenti-finestre mancante, esco")
-            return
+        logger.info("Calcolo domande slot con demand_mode='%s'", self.demand_mode)
 
-        logger.info("Calcolo domande segmenti con demand_mode='%s'", self.demand_mode)
-
-        for segment_id, seg_info in segment_bounds.items():
-            seg_start_min, seg_end_min = self._unpack_segment_bounds(seg_info)
-            segment_duration = max(0, seg_end_min - seg_start_min)
-            if segment_duration <= 0:
+        for slot_id, bounds in slot_bounds.items():
+            try:
+                start_min, end_min = int(bounds[0]), int(bounds[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            slot_duration = max(0, end_min - start_min)
+            if slot_duration <= 0:
                 continue
 
-            windows = segment_to_windows.get(segment_id, [])
+            windows = slot_windows.get(slot_id, [])
             if not windows:
                 continue
 
             if self.demand_mode == "headcount":
-                headcount_sum = 0
+                headcount = 0
                 for win_info in windows:
-                    if isinstance(win_info, tuple):
-                        window_id = win_info[0]
-                    else:
-                        window_id = win_info
-                    demand = self.window_demands.get(window_id, 0)
+                    window_id = win_info[0] if isinstance(win_info, tuple) else win_info
+                    demand = self.window_demands.get(str(window_id), 0)
                     if demand > 0:
-                        headcount_sum += demand
-            
-                # Domanda in persona-minuti per il segmento
-                person_minutes = headcount_sum * segment_duration
-                if person_minutes > 0:
-                    self.segment_demands[segment_id] = person_minutes
-
-            elif self.demand_mode == "person_minutes":
-                total_person_minutes = 0
+                        headcount += demand
+                if headcount > 0:
+                    self.slot_demands[slot_id] = headcount * slot_duration
+            else:
+                total_minutes = 0
                 for win_info in windows:
-                    # se slot_windows contiene coppie (window_id, overlap_minutes)
                     if isinstance(win_info, tuple):
                         window_id, overlap = win_info
                         overlap_minutes = max(0, int(overlap))
                     else:
                         window_id = win_info
-                        overlap_minutes = segment_duration
-
-                    demand = self.window_demands.get(window_id, 0)
+                        overlap_minutes = slot_duration
+                    demand = self.window_demands.get(str(window_id), 0)
                     if demand <= 0 or overlap_minutes <= 0:
                         continue
+                    total_minutes += demand * overlap_minutes
+                if total_minutes > 0:
+                    self.slot_demands[slot_id] = int(round(total_minutes))
 
-                    total_person_minutes += demand * overlap_minutes
-
-                if total_person_minutes > 0:
-                    self.segment_demands[segment_id] = int(round(total_person_minutes))
-
-        # Log statistiche finali
-        if self.segment_demands:
-            total_segments = len(self.segment_demands)
-            total_demand = sum(self.segment_demands.values())
-            avg_demand = total_demand / total_segments
+        if self.slot_demands:
+            total_slots = len(self.slot_demands)
+            total_demand = sum(self.slot_demands.values())
+            avg_demand = total_demand / total_slots
             logger.info(
-                "Domande segmenti (%s): %d segmenti, domanda totale %d, media %.1f",
+                "Domande slot (%s): %d slot, domanda totale %d, media %.1f",
                 self.demand_mode,
-                total_segments,
+                total_slots,
                 total_demand,
-                avg_demand
-                )
+                avg_demand,
+            )
         else:
-            logger.info("Nessun segmento con domanda calcolata")
-                    
+            logger.info("Nessuno slot con domanda calcolata")
 
-    def _compute_segment_skill_demands(self) -> None:
-        """Calcola la domanda di skill per ciascun segmento in persona-minuti."""
-        self.segment_skill_demands = {}
+    def _compute_slot_skill_demands(self) -> None:
+        """Calcola la domanda di skill per ciascuno slot."""
+        self.slot_skill_demands = {}
 
         if not self.adaptive_slot_data or not self.window_skill_requirements:
             return
-        segment_bounds = getattr(self.adaptive_slot_data, "segment_bounds", {}) or {}
-        if not segment_bounds:
-            logger.info("Calcolo domande skill segmenti: segment_bounds mancante, esco")
+
+        slot_bounds = getattr(self.adaptive_slot_data, "slot_bounds", {}) or {}
+        if not slot_bounds:
+            logger.info("Calcolo domande skill slot: slot_bounds mancante, esco")
             return
 
-        raw_slot_windows = getattr(self.adaptive_slot_data, "slot_windows", {}) or self.slot_windows or {}
-        segment_to_windows: dict[str, list[tuple[str, int]]] = {}
-        if raw_slot_windows:
-            cover_map = getattr(self.adaptive_slot_data, "cover_segment", {}) or {}
-            for (segment_id, slot_id), covers in cover_map.items():
-                if not covers:
-                    continue
-                windows = raw_slot_windows.get(slot_id, [])
-                if windows:
-                    segment_to_windows.setdefault(segment_id, []).extend(windows)
-            if not segment_to_windows and isinstance(raw_slot_windows, dict):
-                segment_to_windows = raw_slot_windows  # fallback legacy mapping
-        if not segment_to_windows:
-            logger.info("Calcolo domande skill segmenti: mapping segmenti-finestre mancante, esco")
-            return
-
+        slot_windows = getattr(self.adaptive_slot_data, "slot_windows", {}) or self.slot_windows or {}
         demand_mode = getattr(self, "demand_mode", "headcount")
-        logger.info("Calcolo domande skill segmenti con demand_mode='%s'", demand_mode)
 
-        for segment_id, seg_info in segment_bounds.items():
-            seg_start_min, seg_end_min = self._unpack_segment_bounds(seg_info)
-            segment_duration = max(0, seg_end_min - seg_start_min)
-            if segment_duration <= 0:
+        logger.info("Calcolo domande skill slot con demand_mode='%s'", demand_mode)
+
+        for slot_id, bounds in slot_bounds.items():
+            try:
+                start_min, end_min = int(bounds[0]), int(bounds[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            slot_duration = max(0, end_min - start_min)
+            if slot_duration <= 0:
                 continue
 
-            windows = segment_to_windows.get(segment_id, [])
+            windows = slot_windows.get(slot_id, [])
             if not windows:
                 continue
 
-            if demand_mode == "person_minutes":
-                skill_minutes: dict[str, int] = {}
-                for win_info in windows:
-                    if isinstance(win_info, tuple):
-                        window_id, overlap = win_info
-                        overlap_minutes = max(0, int(overlap))
-                    else:
-                        window_id = win_info
-                        overlap_minutes = segment_duration
-                    if overlap_minutes <= 0:
+            skill_minutes: dict[str, int] = {}
+            for win_info in windows:
+                if isinstance(win_info, tuple):
+                    window_id, overlap = win_info
+                    overlap_minutes = max(0, int(overlap))
+                else:
+                    window_id = win_info
+                    overlap_minutes = slot_duration
+
+                if overlap_minutes <= 0:
+                    continue
+
+                requirements = self.window_skill_requirements.get(str(window_id), {})
+                for skill_name, qty in requirements.items():
+                    qty_int = int(qty)
+                    if qty_int <= 0:
                         continue
+                    minutes = qty_int * overlap_minutes
+                    skill_minutes[skill_name] = skill_minutes.get(skill_name, 0) + minutes
 
-                    skills = self.window_skill_requirements.get(window_id)
-                    if not skills:
-                        continue
+            for skill_name, minutes in skill_minutes.items():
+                if minutes > 0:
+                    self.slot_skill_demands[(slot_id, skill_name)] = minutes
 
-                    for skill_name, qty in skills.items():
-                        try:
-                            qty_int = int(qty)
-                        except (TypeError, ValueError):
-                            continue
-                        if qty_int <= 0:
-                            continue
-                        skill_minutes[skill_name] = skill_minutes.get(skill_name, 0) + qty_int * overlap_minutes
-
-                for skill_name, minutes in skill_minutes.items():
-                    if minutes > 0:
-                        self.segment_skill_demands[(segment_id, skill_name)] = int(round(minutes))
-            else:
-                skill_headcount: dict[str, int] = {}
-                for win_info in windows:
-                    window_id = win_info[0] if isinstance(win_info, tuple) else win_info
-                    skills = self.window_skill_requirements.get(window_id)
-                    if not skills:
-                        continue
-
-                    for skill_name, qty in skills.items():
-                        try:
-                            qty_int = int(qty)
-                        except (TypeError, ValueError):
-                            continue
-                        if qty_int <= 0:
-                            continue
-                        skill_headcount[skill_name] = skill_headcount.get(skill_name, 0) + qty_int
-
-                for skill_name, headcount in skill_headcount.items():
-                    person_minutes = headcount * segment_duration
-                    if person_minutes > 0:
-                        self.segment_skill_demands[(segment_id, skill_name)] = person_minutes
-
-    def _unpack_segment_bounds(self, val):
-        """Unpacks segment bounds handling both (start, end) and (day, role, start, end) formats."""
-        if isinstance(val, (list, tuple)):
-            if len(val) == 2:
-                return int(val[0]), int(val[1])
-            elif len(val) >= 4:
-                return int(val[-2]), int(val[-1])
-        raise ValueError(f"Formato segment_bounds inatteso: {val}")
-
-    def _get_segment_duration_minutes(self, segment_id: str) -> int:
-        """Ottiene la durata di un segmento in minuti."""
+    def _get_slot_duration_minutes(self, slot_id: str) -> int:
+        """Restituisce la durata di uno slot in minuti."""
         if not self.adaptive_slot_data:
-            return self.avg_shift_minutes  # Fallback
-            
-        try:
-            segment_bounds = getattr(self.adaptive_slot_data, 'segment_bounds', {})
-            if segment_id in segment_bounds:
-                start_min, end_min = self._unpack_segment_bounds(segment_bounds[segment_id])
-                return max(1, int(end_min - start_min))
-        except (AttributeError, ValueError):
-            pass
-            
-        return self.avg_shift_minutes  # Fallback
+            return self.avg_shift_minutes
 
+        try:
+            slot_bounds = getattr(self.adaptive_slot_data, "slot_bounds", {})
+            if slot_id in slot_bounds:
+                start_min, end_min = slot_bounds[slot_id]
+                return max(1, int(end_min - start_min))
+        except (AttributeError, ValueError, TypeError):
+            pass
+
+        return self.avg_shift_minutes
 
     def _compute_shift_duration_minutes(self) -> Dict[str, int]:
         """Pre-calcola la durata di ogni turno in minuti interi."""
@@ -855,24 +763,15 @@ class ShiftSchedulingCpSolver:
         return durations
 
     def _compute_total_required_minutes(self) -> int:
-        """
-        Ritorna il fabbisogno complessivo espresso in persona-minuti.
+        """Ritorna il fabbisogno complessivo espresso in persona-minuti."""
+        total_from_slots = 0
 
-        1. Se abbiamo giÃƒÂ  calcolato le domande per segmento (modalitÃƒÂ  windows),
-           usiamo la somma dei segmenti.
-        2. Altrimenti, facciamo il fallback sulla domanda dei turni,
-           cioÃƒÂ¨ durata_turno * required_staff.
-        """
-        total_from_segments = 0
+        if getattr(self, "slot_demands", None):
+            total_from_slots = int(sum(self.slot_demands.values()))
 
-        # Caso finestre/segmenti: somma delle domande per segmento giÃƒÂ  calcolate
-        if getattr(self, "segment_demands", None):
-            total_from_segments = int(sum(self.segment_demands.values()))
+        if total_from_slots > 0:
+            return total_from_slots
 
-        if total_from_segments > 0:
-            return total_from_segments
-
-        # Fallback: usa i dati dei turni (required_staff)
         total_from_shifts = 0
         for _, shift_row in self.shifts.iterrows():
             shift_id = shift_row["shift_id"]
@@ -1258,9 +1157,9 @@ class ShiftSchedulingCpSolver:
                     continue
                 terms.append(duration * var)
 
-        segment_vars = getattr(self, "segment_overstaff_vars", None)
-        if segment_vars:
-            for segment_id, var in segment_vars.items():
+        slot_vars = getattr(self, "slot_overstaff_vars", None)
+        if slot_vars:
+            for slot_id, var in slot_vars.items():
                 if var is None:
                     continue
                 terms.append(var)
@@ -1354,49 +1253,41 @@ class ShiftSchedulingCpSolver:
         return sum(self.workload_dev_vars), True
 
 
-    def _compute_segment_shortfall_expr(self):
-        """NUOVO: Calcola l'espressione per shortfall dei segmenti con turni interi."""
-        if not self.segment_shortfall_vars:
+    def _compute_slot_shortfall_expr(self):
+        """Calcola l'espressione di shortfall sugli slot."""
+        if not self.slot_shortfall_vars:
             return 0, False
 
-        terms = []
-        for segment_id, var in self.segment_shortfall_vars.items():
-            if self.demand_mode == "headcount":
-                # MODALITÃƒâ‚¬ HEADCOUNT: shortfall in persone, moltiplicare per durata segmento
-                # per ottenere persona-minuti per coerenza con funzione obiettivo
-                segment_duration = self._get_segment_duration_minutes(segment_id)
-                terms.append(segment_duration * var)
-            else:
-                # MODALITÃƒâ‚¬ PERSON_MINUTES: shortfall giÃƒÂ  in persona-minuti
-                terms.append(var)
-
+        terms = list(self.slot_shortfall_vars.values())
         if not terms:
             return 0, False
         return sum(terms), True
 
-    def _compute_segment_skill_shortfall_expr(self):
-        """Calcola l'espressione di shortfall skill aggregata sui segmenti."""
-        if not self.segment_skill_shortfall_vars:
+    def _compute_slot_skill_shortfall_expr(self):
+        """Calcola l'espressione di shortfall delle skill sugli slot."""
+        if not self.slot_skill_shortfall_vars:
             return 0, False
 
-        terms = list(self.segment_skill_shortfall_vars.values())
+        terms = list(self.slot_skill_shortfall_vars.values())
         if not terms:
             return 0, False
         return sum(terms), True
 
-    def _set_objective(self) -> None:
+    def _assemble_objective_priority_map(self) -> dict[str, tuple[cp_model.LinearExpr, bool]]:
+        """Costruisce e memorizza le espressioni disponibili per ogni obiettivo."""
+        if self._objective_priority_map is not None:
+            return self._objective_priority_map
+
         window_expr, has_window = self._compute_window_shortfall_expr()
         shortfall_expr, has_shortfall = self._compute_shortfall_cost_expr()
         skill_expr, has_skill = self._compute_skill_shortfall_expr()
-        segment_skill_expr, has_segment_skill = self._compute_segment_skill_shortfall_expr()
+        slot_skill_expr, has_slot_skill = self._compute_slot_skill_shortfall_expr()
         overstaff_expr, has_overstaff = self._compute_overstaff_expr()
         overtime_expr, has_overtime = self._compute_overtime_cost_expr()
         external_expr, has_external = self._compute_external_usage_expr()
         pref_expr, has_pref = self._compute_preference_cost_expr()
         fairness_expr, has_fairness = self._compute_fair_workload_expr()
-
-        # NUOVO: Termini per segmenti con turni interi (se preserve_shift_integrity=True)
-        segment_expr, has_segment = self._compute_segment_shortfall_expr()
+        slot_expr, has_slot = self._compute_slot_shortfall_expr()
 
         priority_map = {
             "unmet_window": (window_expr, has_window),
@@ -1409,14 +1300,18 @@ class ShiftSchedulingCpSolver:
             "fairness": (fairness_expr, has_fairness),
         }
 
-        # Usa sempre i segmenti per unmet_window (modalitÃƒÂ  unica)
-        if has_segment:
-            priority_map["unmet_window"] = (segment_expr, has_segment)
-        if has_segment_skill:
-            priority_map["unmet_skill"] = (segment_skill_expr, has_segment_skill)
+        if has_slot:
+            priority_map["unmet_window"] = (slot_expr, has_slot)
+        if has_slot_skill:
+            priority_map["unmet_skill"] = (slot_skill_expr, has_slot_skill)
 
+        self._objective_priority_map = priority_map
+        return priority_map
 
-        terms = []
+    def _set_objective(self) -> None:
+        priority_map = self._assemble_objective_priority_map()
+
+        terms: list[cp_model.LinearExpr] = []
         for key in self.objective_priority:
             expr, available = priority_map.get(key, (0, False))
             weight = self.objective_weights.get(key, 0)
@@ -1428,6 +1323,18 @@ class ShiftSchedulingCpSolver:
             return
 
         self.model.Minimize(sum(terms))
+
+    def _collect_lex_stages(self) -> list[tuple[str, cp_model.LinearExpr]]:
+        """Restituisce la sequenza (chiave, espressione) per ottimizzazione lessicografica."""
+        priority_map = self._assemble_objective_priority_map()
+        stages: list[tuple[str, cp_model.LinearExpr]] = []
+        for key in self.objective_priority:
+            expr, available = priority_map.get(key, (0, False))
+            weight = self.objective_weights.get(key, 0)
+            if not available or not weight:
+                continue
+            stages.append((key, expr))
+        return stages
 
     def _add_min_rest_constraints(self) -> None:
         """Impedisce che un dipendente prenda due turni troppo ravvicinati."""
@@ -1483,6 +1390,9 @@ class ShiftSchedulingCpSolver:
 
     def solve(self) -> cp_model.CpSolver:
         """Esegue la risoluzione CP-SAT."""
+        if self.objective_mode == "lex":
+            return self._solve_lex()
+
         solver = cp_model.CpSolver()
         if self.config.max_seconds is not None:
             solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
@@ -1494,6 +1404,81 @@ class ShiftSchedulingCpSolver:
 
         solver.Solve(self.model)
         return solver
+
+    def _solve_lex(self) -> cp_model.CpSolver:
+        """Risoluzione lessicografica pura tramite passaggi successivi."""
+        stages = self._collect_lex_stages()
+        if not stages:
+            solver = cp_model.CpSolver()
+            if self.config.max_seconds is not None:
+                solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
+            solver.parameters.log_search_progress = self.config.log_search_progress
+            if self.random_seed is not None:
+                solver.parameters.random_seed = int(self.random_seed)
+            if self.mip_gap is not None:
+                solver.parameters.relative_gap_limit = float(self.mip_gap)
+            solver.Solve(self.model)
+            return solver
+
+        total_limit = float(self.config.max_seconds) if self.config.max_seconds else None
+        per_stage = None
+        if total_limit and total_limit > 0:
+            per_stage = max(1.0, total_limit / len(stages))
+
+        clear_hints = getattr(self.model, "ClearHints", None)
+        if callable(clear_hints):
+            clear_hints()
+
+        last_solver: cp_model.CpSolver | None = None
+        solver: cp_model.CpSolver | None = None
+
+        for index, (key, expr) in enumerate(stages, start=1):
+            self.model.Minimize(expr)
+
+            solver = cp_model.CpSolver()
+            if per_stage is not None:
+                solver.parameters.max_time_in_seconds = float(per_stage)
+            elif self.config.max_seconds is not None:
+                solver.parameters.max_time_in_seconds = float(self.config.max_seconds)
+            solver.parameters.log_search_progress = self.config.log_search_progress
+            if self.random_seed is not None:
+                solver.parameters.random_seed = int(self.random_seed)
+            if self.mip_gap is not None:
+                solver.parameters.relative_gap_limit = float(self.mip_gap)
+
+            if last_solver is not None and self.assignment_vars:
+                if callable(clear_hints):
+                    clear_hints()
+                for var in self.assignment_vars.values():
+                    try:
+                        hint_val = last_solver.Value(var)
+                    except Exception:
+                        continue
+                    self.model.AddHint(var, hint_val)
+
+            status = solver.Solve(self.model)
+            if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                return solver
+
+            best_val = solver.ObjectiveValue()
+            try:
+                best_int = int(round(best_val))
+            except (TypeError, ValueError):
+                best_int = None
+            if best_int is not None:
+                self.model.Add(expr <= best_int)
+
+            last_solver = solver
+            logger.debug(
+                "Lexicographic stage %d/%d (%s): objective=%s",
+                index,
+                len(stages),
+                key,
+                best_val,
+            )
+
+        assert solver is not None
+        return last_solver if last_solver is not None else solver
 
     def extract_assignments(self, solver: cp_model.CpSolver) -> pd.DataFrame:
         """Costruisce un DataFrame con le assegnazioni attive nel modello risolto."""
@@ -1718,62 +1703,70 @@ class ShiftSchedulingCpSolver:
     def extract_objective_breakdown(self, solver: cp_model.CpSolver) -> dict[str, dict[str, float]]:
         """Calcola breakdown dettagliato dell'obiettivo per componente."""
         breakdown = {}
-        
-        # 1. Finestre (modalitÃƒÂ  unica segmenti)
+
+        # 1. Finestre (shortfall sugli slot)
         window_minutes = 0
         window_cost = 0.0
-        if hasattr(self, 'segment_shortfall_vars') and self.segment_shortfall_vars:
-            weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
-            for segment_id, var in self.segment_shortfall_vars.items():
-                shortfall_units = solver.Value(var)
-                if shortfall_units > 0:
-                    segment_duration = self._get_segment_duration_minutes(segment_id)
-                    minutes = shortfall_units * segment_duration
-                    window_minutes += minutes
-                    window_cost += minutes * weight_per_min
-        
+        weight_per_min = self.objective_weights_minutes.get("unmet_window", 0.0)
+        slot_shortfalls = getattr(self, "slot_shortfall_vars", {})
+        for slot_id, var in slot_shortfalls.items():
+            minutes = solver.Value(var)
+            if minutes <= 0:
+                continue
+            window_minutes += minutes
+            window_cost += minutes * weight_per_min
+
         breakdown["unmet_window"] = {
             "minutes": window_minutes,
             "cost": window_cost,
-            "weight_per_min": self.objective_weights_minutes.get("unmet_window", 0.0)
+            "weight_per_min": weight_per_min,
         }
-        
+
         # 2. Turni (shortfall hard)
         shift_minutes = 0
         shift_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("unmet_demand", 0.0)
         for shift_id, var in self.shortfall_vars.items():
-            shortfall_units = solver.Value(var)
-            if shortfall_units > 0:
-                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
-                minutes = shortfall_units * shift_duration
-                shift_minutes += minutes
-                shift_cost += minutes * weight_per_min
-        
+            units = solver.Value(var)
+            if units <= 0:
+                continue
+            duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+            minutes = units * duration
+            shift_minutes += minutes
+            shift_cost += minutes * weight_per_min
+
         breakdown["unmet_demand"] = {
             "minutes": shift_minutes,
             "cost": shift_cost,
-            "weight_per_min": weight_per_min
+            "weight_per_min": weight_per_min,
         }
-        
+
         # 3. Skill shortfall
         skill_minutes = 0
         skill_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("unmet_skill", 0.0)
-        for (shift_id, skill_name), var in self.skill_shortfall_vars.items():
-            shortfall_units = solver.Value(var)
-            if shortfall_units > 0:
-                shift_duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
-                minutes = shortfall_units * shift_duration
-                skill_minutes += minutes
-                skill_cost += minutes * weight_per_min
-        
+        for (shift_id, _skill), var in self.skill_shortfall_vars.items():
+            units = solver.Value(var)
+            if units <= 0:
+                continue
+            duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+            minutes = units * duration
+            skill_minutes += minutes
+            skill_cost += minutes * weight_per_min
+        slot_skill_shortfalls = getattr(self, "slot_skill_shortfall_vars", {})
+        for (_slot_id, _skill), var in slot_skill_shortfalls.items():
+            minutes = solver.Value(var)
+            if minutes <= 0:
+                continue
+            skill_minutes += minutes
+            skill_cost += minutes * weight_per_min
+
         breakdown["unmet_skill"] = {
             "minutes": skill_minutes,
             "cost": skill_cost,
-            "weight_per_min": weight_per_min
+            "weight_per_min": weight_per_min,
         }
-        
+
         # 4. Utilizzo risorse esterne
         external_minutes = 0
         external_cost = 0.0
@@ -1794,81 +1787,79 @@ class ShiftSchedulingCpSolver:
         overstaff_minutes = 0
         overstaff_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("overstaff", 0.0)
-
-        if self.shift_overstaff_vars:
-            for shift_id, var in self.shift_overstaff_vars.items():
-                units = solver.Value(var)
-                if units > 0:
-                    duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
-                    minutes = units * duration
-                    overstaff_minutes += minutes
-                    overstaff_cost += minutes * weight_per_min
-
-        segment_vars = getattr(self, "segment_overstaff_vars", None)
-        if segment_vars:
-            for segment_id, var in segment_vars.items():
-                value = solver.Value(var)
-                if value > 0:
-                    overstaff_minutes += value
-                    overstaff_cost += value * weight_per_min
+        for shift_id, var in self.shift_overstaff_vars.items():
+            units = solver.Value(var)
+            if units <= 0:
+                continue
+            duration = self.duration_minutes.get(shift_id, self.avg_shift_minutes)
+            minutes = units * duration
+            overstaff_minutes += minutes
+            overstaff_cost += minutes * weight_per_min
+        slot_overstaff = getattr(self, "slot_overstaff_vars", {})
+        for slot_id, var in slot_overstaff.items():
+            minutes = solver.Value(var)
+            if minutes <= 0:
+                continue
+            overstaff_minutes += minutes
+            overstaff_cost += minutes * weight_per_min
 
         breakdown["overstaff"] = {
             "minutes": overstaff_minutes,
             "cost": overstaff_cost,
-            "weight_per_min": weight_per_min
+            "weight_per_min": weight_per_min,
         }
 
-        # 7. Straordinari
+        # 6. Straordinari
         overtime_minutes = 0
         overtime_cost = 0.0
         weight_per_min = self.objective_weights_minutes.get("overtime", 0.0)
         for emp_id, var in self.overtime_vars.items():
-            ot_minutes = solver.Value(var)
-            if ot_minutes > 0:
-                overtime_minutes += ot_minutes
-                overtime_cost += ot_minutes * weight_per_min
+            minutes = solver.Value(var)
+            if minutes > 0:
+                overtime_minutes += minutes
+                overtime_cost += minutes * weight_per_min
 
         breakdown["overtime"] = {
             "minutes": overtime_minutes,
             "cost": overtime_cost,
-            "weight_per_min": weight_per_min
-        }
-
-        # 8. Preferenze (violazioni pesate)
-        pref_violations = 0
-        pref_cost = 0.0
-        weight_per_min = self.objective_weights_minutes.get("preferences", 0.0)
-        for (emp_id, shift_id), var in self.assignment_vars.items():
-            if solver.Value(var):
-                score = self.preference_score_by_pair.get((emp_id, shift_id), 0)
-                if score < 0:
-                    pref_violations += abs(score)
-                    pref_cost += abs(score) * self.mean_shift_minutes * weight_per_min
-
-        breakdown["preferences"] = {
-            "violations": pref_violations,
-            "cost": pref_cost,
             "weight_per_min": weight_per_min,
-            "mean_shift_minutes": self.mean_shift_minutes
         }
 
-        # 9. Fairness (deviazioni workload)
-        fairness_deviations = 0
-        fairness_cost = 0.0
-        weight_per_min = self.objective_weights_minutes.get("fairness", 0.0)
-        for var in self.workload_dev_vars:
-            deviation = solver.Value(var)
-            if deviation > 0:
-                fairness_deviations += deviation
-                fairness_cost += deviation * weight_per_min
+        # 7. Preferenze
+        pref_penalty = 0
+        weight_per_min = self.objective_weights_minutes.get("preferences", 0.0)
+        if self.preference_score_by_pair:
+            for (emp_id, shift_id), var in self.assignment_vars.items():
+                score = self.preference_score_by_pair.get((emp_id, shift_id))
+                if score is None or score >= 0:
+                    continue
+                if solver.Value(var) > 0:
+                    pref_penalty += -score
+        breakdown["preferences"] = {
+            "minutes": pref_penalty,
+            "cost": pref_penalty * weight_per_min,
+            "weight_per_min": weight_per_min,
+            "violations": pref_penalty,
+            "mean_shift_minutes": self.mean_shift_minutes,
+        }
 
+        # 8. Fairness
+        fairness_minutes = 0
+        weight_per_min = self.objective_weights_minutes.get("fairness", 0.0)
+        if self.workload_dev_vars:
+            for var in self.workload_dev_vars:
+                val = solver.Value(var)
+                if val > 0:
+                    fairness_minutes += val
         breakdown["fairness"] = {
-            "deviations_minutes": fairness_deviations,
-            "cost": fairness_cost,
-            "weight_per_min": weight_per_min
+            "minutes": fairness_minutes,
+            "cost": fairness_minutes * weight_per_min,
+            "weight_per_min": weight_per_min,
+            "deviations_minutes": fairness_minutes,
         }
 
         return breakdown
+
 
     def log_objective_breakdown(self, solver: cp_model.CpSolver) -> None:
         """Log compatto del breakdown obiettivo post-solve."""
@@ -2155,6 +2146,7 @@ def main(argv: list[str] | None = None) -> int:
         mip_gap=cfg.solver.mip_gap,
         skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
+        objective_mode=cfg.objective.mode,
     )
 
     summary = {
@@ -2165,6 +2157,7 @@ def main(argv: list[str] | None = None) -> int:
         "solver_mip_gap": cfg.solver.mip_gap,
         "random_seed": cfg.random.seed,
         "skills_slack_enabled": cfg.skills.enable_slack,
+        "objective_mode": cfg.objective.mode,
     }
     logger.info("Configurazione risolta: %s", summary)
 
