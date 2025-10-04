@@ -1,51 +1,51 @@
 employee_id,name,roles,max_week_hours,min_rest_hours,max_overtime_hours,skills,contracted_hours,min_week_hours
-E001,Walter,nurse|triage|doctor|receptionist,40,11,4,"admin,communication,emergency,first_aid",,16
-E002,Andrea,triage|nurse|doctor,,11,0,"communication,emergency,first_aid",40,
-E003,Franco,doctor,32,11,2,emergency,,24
-E004,Pietro,triage|doctor,36,11,0,"communication,emergency,first_aid",,28
-E005,Nino,doctor|labtech,38,11,0,"emergency,lab",38,38
-E006,Leonardo,doctor,36,11,0,emergency,,32
-E007,Paolo,icu_nurse|doctor,38,11,2,"emergency,first_aid,icu",38,38
-E008,Silvia,nurse|doctor,32,11,2,"emergency,first_aid",,24
-E009,Sofia,labtech,32,11,0,lab,,16
-E010,Xenia,triage|receptionist,40,11,2,"admin,communication,first_aid",,32
-E011,Matteo,triage,38,11,0,"communication,first_aid",38,38
-E012,Marco,triage|radiology,32,11,2,"communication,first_aid,radiology",,24
-E013,Elisa,nurse,38,11,0,first_aid,38,38
-E014,Paola,nurse|icu_nurse,36,11,2,"first_aid,icu",,24
-E015,Alex,nurse,38,11,4,first_aid,38,38
-E016,Tariq,nurse|triage,38,11,2,"communication,first_aid,leadership",38,38
-E017,Yara,doctor|labtech,32,11,0,"emergency,lab",,28
-E018,Diego,nurse|icu_nurse|triage,,11,2,"communication,first_aid,icu",40,
-E019,Umberto,nurse,,11,2,first_aid,32,
-E020,Francesca,receptionist,40,11,2,"admin,communication",40,40
-E021,Valeria,nurse,40,11,2,first_aid,,24
-E022,Giulia,nurse|icu_nurse,40,11,4,"first_aid,icu",,28
-E023,Tina,triage|receptionist,32,11,2,"admin,communication,first_aid",,32
-E024,Qi,triage|labtech,40,11,2,"communication,first_aid,lab",40,40
-E025,Dario,icu_nurse|triage,38,11,2,"communication,first_aid,icu",38,38
-E026,Benedetta,nurse|icu_nurse|triage,32,11,0,"communication,first_aid,icu",,16
-E027,Nadia,icu_nurse,40,11,2,"first_aid,icu",40,40
-E028,Noemi,nurse|icu_nurse,,11,4,"first_aid,icu,leadership",40,
-E029,Edoardo,radiology,32,11,0,radiology,,32
-E030,Claudia,nurse,,11,2,first_aid,32,
-E031,Ruben,nurse,32,11,0,first_aid,,32
-E032,Bob,nurse|icu_nurse|triage,36,11,4,"communication,first_aid,icu",36,36
-E033,Alice,triage|radiology,36,11,2,"communication,first_aid,radiology",,24
-E034,Laura,triage,38,11,0,"communication,first_aid",38,38
-E035,Ilaria,labtech,36,11,2,"lab,leadership",36,36
-E036,Marta,triage,40,11,4,"communication,first_aid,leadership",,16
-E037,Eva,radiology,32,11,2,radiology,,32
-E038,Hassan,receptionist,36,11,0,"admin,communication",,16
-E039,Barbara,triage|radiology,36,11,2,"communication,first_aid,radiology",36,36
-E040,Zeno,triage,40,11,0,"communication,first_aid",,28
-E041,Lucia,nurse,40,11,0,first_aid,40,40
-E042,Gabriele,doctor,32,11,2,emergency,,24
-E043,Grazia,icu_nurse|triage,36,11,4,"communication,first_aid,icu",,24
-E044,Beatrice,radiology,40,11,2,radiology,,24
-E045,Giorgio,triage,40,11,2,"communication,first_aid",40,40
-E046,Federica,nurse,40,11,2,first_aid,40,40
-E047,Carla,nurse|icu_nurse,36,11,0,"first_aid,icu",,24
-E048,Michela,triage|receptionist,,11,4,"admin,communication,first_aid",32,
-E049,Enrico,nurse|triage,38,11,0,"communication,first_aid",38,38
-E050,Omar,triage,,11,4,"communication,first_aid",40,
+E201,Operatore 201,nurse,36,11,4,"first_aid,daycare",30,30
+E202,Operatore 202,nurse,36,11,4,"first_aid,daycare",30,30
+E203,Operatore 203,nurse,36,11,4,"first_aid,daycare",30,30
+E204,Operatore 204,nurse,36,11,4,"first_aid,daycare",30,30
+E205,Operatore 205,nurse,36,11,4,"first_aid,daycare",30,30
+E206,Operatore 206,nurse,36,11,4,"first_aid,daycare",30,30
+E207,Operatore 207,nurse,36,11,4,"first_aid,daycare",30,30
+E208,Operatore 208,nurse,36,11,4,"first_aid,daycare",30,30
+E209,Operatore 209,nurse,36,11,4,"first_aid,daycare",30,30
+E210,Operatore 210,nurse,36,11,4,"first_aid,daycare",30,30
+E211,Operatore 211,nurse,36,11,4,"first_aid,daycare",30,30
+E212,Operatore 212,nurse,36,11,4,"first_aid,daycare",30,30
+E213,Operatore 213,nurse,36,11,4,"first_aid,daycare",30,30
+E214,Operatore 214,nurse,36,11,4,"first_aid,daycare",30,30
+E215,Operatore 215,nurse,36,11,4,"first_aid,daycare",30,30
+E216,Operatore 216,nurse,36,11,4,"first_aid,daycare",30,30
+E217,Operatore 217,nurse,36,11,4,"first_aid,daycare",30,30
+E218,Operatore 218,nurse,36,11,4,"first_aid,daycare",30,30
+E219,Operatore 219,nurse,36,11,4,"first_aid,daycare",30,30
+E220,Operatore 220,nurse,36,11,4,"first_aid,daycare",30,30
+E221,Operatore 221,nurse,32,11,4,"first_aid,swing",,0
+E222,Operatore 222,nurse,32,11,4,"first_aid,swing",,0
+E223,Operatore 223,nurse,32,11,4,"first_aid,swing",,0
+E224,Operatore 224,nurse,32,11,4,"first_aid,swing",,0
+E225,Operatore 225,nurse,32,11,4,"first_aid,swing",,0
+E226,Operatore 226,nurse,32,11,4,"first_aid,swing",,0
+E227,Operatore 227,nurse,32,11,4,"first_aid,swing",,0
+E228,Operatore 228,nurse,32,11,4,"first_aid,swing",,0
+E229,Operatore 229,nurse,32,11,4,"first_aid,swing",,0
+E230,Operatore 230,nurse,32,11,4,"first_aid,swing",,0
+E231,Operatore 231,nurse,32,11,4,"first_aid,swing",,0
+E232,Operatore 232,nurse,32,11,4,"first_aid,swing",,0
+E233,Operatore 233,nurse,32,11,4,"first_aid,swing",,0
+E234,Operatore 234,nurse,32,11,4,"first_aid,swing",,0
+E235,Operatore 235,nurse,32,11,4,"first_aid,swing",,0
+E236,Operatore 236,nurse,40,11,6,"first_aid,night",,0
+E237,Operatore 237,nurse,40,11,6,"first_aid,night",,0
+E238,Operatore 238,nurse,40,11,6,"first_aid,night",,0
+E239,Operatore 239,nurse,40,11,6,"first_aid,night",,0
+E240,Operatore 240,nurse,40,11,6,"first_aid,night",,0
+E241,Operatore 241,nurse,40,11,6,"first_aid,night",,0
+E242,Operatore 242,nurse,40,11,6,"first_aid,night",,0
+E243,Operatore 243,nurse,40,11,6,"first_aid,night",,0
+E244,Operatore 244,nurse,40,11,6,"first_aid,night",,0
+E245,Operatore 245,nurse,40,11,6,"first_aid,night",,0
+E246,Operatore 246,nurse,40,11,6,"first_aid,night",,0
+E247,Operatore 247,nurse,40,11,6,"first_aid,night",,0
+E248,Operatore 248,nurse,40,11,6,"first_aid,night",,0
+E249,Operatore 249,nurse,40,11,6,"first_aid,night",,0
+E250,Operatore 250,nurse,40,11,6,"first_aid,night",,0
