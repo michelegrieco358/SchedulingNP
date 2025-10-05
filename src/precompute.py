@@ -199,10 +199,12 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             key = (row.day, row.role)
             start_min = int(row.window_start_min)
             end_min = int(row.window_end_min)
+            if end_min <= start_min:
+                raise ValueError(
+                    "Windows non normalizzate: il loader deve dividere le finestre overnight in due righe (day e day+1)."
+                )
             windows_by_key.setdefault(key, []).append((start_min, end_min))
             role = getattr(row, "role", None)
-            if end_min <= start_min:
-                end_min += 1440
             window_bounds[str(row.window_id)] = (row.day, role, start_min, end_min)
 
     for key in sorted(segments_by_day_role.keys()):
@@ -421,7 +423,9 @@ def map_windows_to_slots(
         window_start = int(row.window_start_min)
         window_end = int(row.window_end_min)
         if window_end <= window_start:
-            raise ValueError(f"Finestra {window_id}: intervallo non valido")
+            raise ValueError(
+                "Finestra non normalizzata (end<=start). Il loader deve aver già diviso le finestre overnight."
+            )
 
         available_slots = data.slots_by_day_role[key]
         selected: List[str] = []
