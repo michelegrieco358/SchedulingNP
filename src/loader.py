@@ -884,11 +884,6 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None) -> SimpleN
             return default
 
     # --- Dizionari dai turni ---
-    shift_duration_minutes = {
-        str(row.shift_id): _to_int_safe(getattr(row, "duration_minutes", 0), 0)
-        for row in shifts.itertuples()
-    }
-
     shift_records = {
         str(row.shift_id): {
             "day": getattr(row, "day", None),
@@ -946,7 +941,6 @@ def load_data_bundle(data_dir: Path, *, config: object | None = None) -> SimpleN
         windows_df=windows_df,
         shifts=shift_records,
         windows=window_records,
-        shift_duration_minutes=shift_duration_minutes,
         emp_skills=emp_skills,
         eligible=eligible,
     )
