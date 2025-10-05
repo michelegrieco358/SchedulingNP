@@ -7,9 +7,6 @@ hours:
 rest:
   min_between_shifts: 8
 
-skills:
-  enable_slack: true
-
 windows:
   coverage_mode: "adaptive_slots"
   enable_slot_slack: true
