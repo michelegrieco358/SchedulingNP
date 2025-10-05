@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from types import SimpleNamespace
 
+import numpy as np
 from dateutil import parser as dtparser
 import pandas as pd
 
@@ -72,54 +73,75 @@ def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# --- 2) Tabella gap tra TUTTE le coppie di turni (s, s') ---
-def compute_gap_table(shifts_norm: pd.DataFrame) -> pd.DataFrame:
-    """
-    Restituisce un DataFrame con colonne:
-      - shift_id_from, shift_id_to, gap_h
-    dove gap_h = ore tra fine di 'from' e inizio di 'to', può essere negativo se si sovrappongono).
-    """
-    a = shifts_norm[["shift_id", "start_dt", "end_dt"]].copy()
-    b = shifts_norm[["shift_id", "start_dt"]].copy()
-    a.columns = ["shift_id_from", "start_dt_from", "end_dt_from"]
-    b.columns = ["shift_id_to", "start_dt_to"]
-
-    a["key"] = 1
-    b["key"] = 1
-    cart = a.merge(b, on="key").drop(columns="key")
-
-    cart = cart[cart["start_dt_from"] < cart["start_dt_to"]]
-
-    cart["gap_h"] = (cart["start_dt_to"] - cart["end_dt_from"]).dt.total_seconds() / 3600.0
-    return cart[["shift_id_from", "shift_id_to", "gap_h"]]
-
-
-# --- 3) A partire dalla gap table, estrae solo le coppie di turni che violano un riposo minimo globale.
+# --- 2) Coppie di turni che violano un riposo minimo globale.
 def conflict_pairs_for_rest(shifts_norm: pd.DataFrame, min_rest_hours: float) -> pd.DataFrame:
     """
-    Restituisce le coppie (from,to) che violano un riposo minimo GLOBALE passato in input:
-      gap_h < min_rest_hours
-    Nota: se vuoi usare min_rest_hours *per dipendente*, non filtrare qui; usa la gap_table nel modello.
+    Restituisce le sole coppie (from,to) di turni che violano il riposo minimo globale:
+        gap_h = start_to - end_from  <  min_rest_hours
+
+    La funzione è implementata per funzionare in tempo quasi-lineare nel numero di turni,
+    evitando la costruzione del prodotto cartesiano completo tra tutte le coppie di turni.
     """
-    gap = compute_gap_table(shifts_norm)
-    conf = gap[gap["gap_h"] < float(min_rest_hours)].copy()
 
-    if conf.empty:
-        return conf.reset_index(drop=True)
+    if shifts_norm.empty:
+        return pd.DataFrame(columns=["shift_id_from", "shift_id_to", "gap_h"])
 
-    conf = conf.drop_duplicates(subset=["shift_id_from", "shift_id_to"])
-    return conf.reset_index(drop=True)
+    # Ordina per inizio turno (obbligatorio per sfruttare la ricerca binaria).
+    srt = shifts_norm.sort_values("start_dt").reset_index(drop=True)
+
+    # Convertiamo i datetime in minuti interi per ottenere confronti numerici stabili e veloci.
+    start_min = srt["start_dt"].to_numpy(dtype="datetime64[m]").astype(np.int64)
+    end_min = srt["end_dt"].to_numpy(dtype="datetime64[m]").astype(np.int64)
+    shift_ids = srt["shift_id"].astype(str).to_numpy()
+
+    min_rest_min = int(round(float(min_rest_hours) * 60.0))
+
+    out_from: list[str] = []
+    out_to: list[str] = []
+    out_gap_h: list[float] = []
+
+    n = len(srt)
+    for i in range(n):
+        limit = end_min[i] + min_rest_min
+
+        j0 = i + 1
+        if j0 >= n:
+            break
+
+        j1 = int(np.searchsorted(start_min, limit, side="left"))
+        if j1 <= j0:
+            continue
+
+        gaps_min = start_min[j0:j1] - end_min[i]
+        gaps_h = gaps_min.astype(np.float64) / 60.0
+
+        js = np.arange(j0, j1, dtype=np.int64)
+        out_from.extend(shift_ids[i] for _ in js)
+        out_to.extend(shift_ids[js])
+        out_gap_h.extend(gaps_h.tolist())
+
+    return pd.DataFrame(
+        {
+            "shift_id_from": out_from,
+            "shift_id_to": out_to,
+            "gap_h": out_gap_h,
+        }
+    )
 
 
-# --- 4) Utility di riepilogo per debug ---
-def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample: int = 10) -> pd.DataFrame:
+# --- 3) Utility di riepilogo per debug ---
+def summarize_shifts(
+    shifts_norm: pd.DataFrame,
+    rest_conflicts: pd.DataFrame,
+    sample: int = 10,
+) -> pd.DataFrame:
     """
     Stampa un riepilogo dei turni normalizzati e restituisce il DataFrame di riepilogo.
     
     Args:
         shifts_norm: DataFrame dei turni normalizzati
-        gap_table: DataFrame con i gap tra turni
-        sample: Numero di righe di esempio da mostrare per i gap
+        rest_conflicts: DataFrame con le coppie di turni che violano il riposo minimo
+        sample: Numero di righe di esempio da mostrare per i conflitti
         
     Returns:
         DataFrame con le colonne principali dei turni normalizzati
@@ -131,9 +153,9 @@ def summarize_shifts(shifts_norm: pd.DataFrame, gap_table: pd.DataFrame, sample:
 
     print(summary_df.to_string(index=False, max_colwidth=24))
     print()
-    print("=== Esempi di gap (prime righe) ===")
-    print(gap_table.head(sample).to_string(index=False))
-    
+    print("=== Esempi di conflitti di riposo (prime righe) ===")
+    print(rest_conflicts.head(sample).to_string(index=False))
+
     return summary_df
 
 def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
