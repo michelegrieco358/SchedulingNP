@@ -33,7 +33,15 @@ def normalize_shift_times(shifts: pd.DataFrame) -> pd.DataFrame:
       - start_dt, end_dt: datetime calcolati da day+start/end
       - duration_h: durata in ore (float)
     Regola: se end <= start, l'end si intende al giorno successivo (turno che "attraversa" le 24:00).
+
+    Se il DataFrame contiene già le colonne normalizzate (ad esempio quando proviene da
+    :func:`loader.load_shifts`), restituisce una copia senza ricalcolare i valori. La
+    logica sottostante rimane disponibile come fallback per dataset artigianali privi di
+    tali colonne.
     """
+    if {"start_dt", "end_dt", "duration_h"}.issubset(shifts.columns):
+        return shifts.copy()
+
     df = shifts.copy()
 
     def _mk_dt(day_obj, hhmm):
