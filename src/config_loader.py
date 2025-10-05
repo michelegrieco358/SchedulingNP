@@ -58,10 +58,9 @@ class WindowsConfig(BaseModel):
     @field_validator("midnight_policy")
     @classmethod
     def check_policy(cls, value: str) -> str:
-        allowed = {"split", "extend"}  # o le opzioni che vuoi supportare
         value = value.strip().lower()
-        if value not in allowed:
-            raise ValueError(f"midnight_policy deve essere uno tra {sorted(allowed)}")
+        if value != "split":
+            raise ValueError("midnight_policy supporta solo il valore 'split'")
         return value
 
 
