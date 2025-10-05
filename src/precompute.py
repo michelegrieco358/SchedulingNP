@@ -178,16 +178,14 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             add_segment(shift_id, base_day, role, start_min, end_min)
             continue
 
-        if midnight_policy == "exclude":
-            add_segment(shift_id, base_day, role, start_min, 1440)
-        elif midnight_policy == "split":
-            if start_min < 1440:
-                add_segment(shift_id, base_day, role, start_min, 1440)
-            next_day = base_day + timedelta(days=1)
-            if end_min > 0:
-                add_segment(shift_id, next_day, role, 0, end_min)
-        else:
+        if midnight_policy != "split":
             raise ValueError(f"Midnight policy sconosciuta: {midnight_policy}")
+
+        if start_min < 1440:
+            add_segment(shift_id, base_day, role, start_min, 1440)
+        next_day = base_day + timedelta(days=1)
+        if end_min > 0:
+            add_segment(shift_id, next_day, role, 0, end_min)
 
     slots_by_day_role: Dict[tuple[date, str], List[str]] = {}
     slot_minutes: Dict[str, int] = {}
@@ -201,14 +199,19 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             key = (row.day, row.role)
             start_min = int(row.window_start_min)
             end_min = int(row.window_end_min)
+            if end_min <= start_min:
+                raise ValueError(
+                    "Windows non normalizzate: il loader deve dividere le finestre overnight in due righe (day e day+1)."
+                )
             windows_by_key.setdefault(key, []).append((start_min, end_min))
             role = getattr(row, "role", None)
-            if end_min <= start_min:
-                end_min += 1440
             window_bounds[str(row.window_id)] = (row.day, role, start_min, end_min)
 
-    for key in sorted(segments_by_day_role.keys()):
-        seg_ids = segments_by_day_role[key]
+    # Consider both segments and windows when generating slots per (day, role)
+    all_keys = set(segments_by_day_role.keys()) | set(windows_by_key.keys())
+
+    for key in sorted(all_keys):
+        seg_ids = segments_by_day_role.get(key, [])
         breakpoints: List[int] = []
         
         # Aggiungi breakpoints dai segmenti (turni)
@@ -423,7 +426,9 @@ def map_windows_to_slots(
         window_start = int(row.window_start_min)
         window_end = int(row.window_end_min)
         if window_end <= window_start:
-            raise ValueError(f"Finestra {window_id}: intervallo non valido")
+            raise ValueError(
+                "Finestra non normalizzata (end<=start). Il loader deve aver già diviso le finestre overnight."
+            )
 
         available_slots = data.slots_by_day_role[key]
         selected: List[str] = []
