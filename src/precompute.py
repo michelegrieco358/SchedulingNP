@@ -207,8 +207,11 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             role = getattr(row, "role", None)
             window_bounds[str(row.window_id)] = (row.day, role, start_min, end_min)
 
-    for key in sorted(segments_by_day_role.keys()):
-        seg_ids = segments_by_day_role[key]
+    # Consider both segments and windows when generating slots per (day, role)
+    all_keys = set(segments_by_day_role.keys()) | set(windows_by_key.keys())
+
+    for key in sorted(all_keys):
+        seg_ids = segments_by_day_role.get(key, [])
         breakpoints: List[int] = []
         
         # Aggiungi breakpoints dai segmenti (turni)
