@@ -212,8 +212,8 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
                     "Windows non normalizzate: il loader deve dividere le finestre overnight in due righe (day e day+1)."
                 )
             windows_by_key.setdefault(key, []).append((start_min, end_min))
-            role = getattr(row, "role", None)
-            window_bounds[str(row.window_id)] = (row.day, role, start_min, end_min)
+            row_role = getattr(row, "role", None)
+            window_bounds[str(row.window_id)] = (row.day, row_role, start_min, end_min)
 
     # Consider both segments and windows when generating slots per (day, role)
     all_keys = set(segments_by_day_role.keys()) | set(windows_by_key.keys())
