@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from src import loader, precompute
 
 
@@ -17,3 +19,14 @@ def test_loader_extracts_window_skills(sample_environment):
     key = next(iter(slots_in_window))
     assert slots_in_window[key], "each window should reference at least one slot"
     assert adaptive.slots_by_day_role, "adaptive slots must be generated"
+
+
+def test_normalize_shift_times_passthrough(sample_environment):
+    shifts = sample_environment.shifts
+
+    normalized = precompute.normalize_shift_times(shifts)
+
+    assert normalized is not shifts
+    pd.testing.assert_series_equal(normalized["start_dt"], shifts["start_dt"], check_names=False)
+    pd.testing.assert_series_equal(normalized["end_dt"], shifts["end_dt"], check_names=False)
+    pd.testing.assert_series_equal(normalized["duration_h"], shifts["duration_h"], check_names=False)
