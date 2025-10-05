@@ -123,7 +123,6 @@ class SolverConfig:
     global_overtime_cap_minutes: int | None = None
     random_seed: int | None = None
     mip_gap: float | None = None
-    skills_slack_enabled: bool = True
     objective_priority: tuple[str, ...] = DEFAULT_OBJECTIVE_PRIORITY
     objective_mode: str = "weighted"
 
@@ -286,7 +285,6 @@ class ShiftSchedulingCpSolver:
         self.config.external_use_weight = base_weights.get("external_use", getattr(self.config, "external_use_weight", DEFAULT_EXTERNAL_USE_WEIGHT))
         self.config.preferences_weight = base_weights.get("preferences", self.config.preferences_weight)
         self.config.fairness_weight = base_weights.get("fairness", self.config.fairness_weight)
-        self.config.skills_slack_enabled = bool(self.config.skills_slack_enabled)
         self.config.objective_priority = tuple(priority)
         self._objective_priority_map: dict[str, tuple[cp_model.LinearExpr, bool]] | None = None
 
@@ -318,7 +316,6 @@ class ShiftSchedulingCpSolver:
         self.avg_shift_minutes: int = 60
         self.min_overtime_cost_per_hour: float | None = None
         self.role_overtime_costs: dict[str, float] = {}
-        self.skill_slack_enabled: bool = bool(self.config.skills_slack_enabled)
         self._night_shift_ids: set[str] = set()
         if overtime_costs is not None and not overtime_costs.empty:
             self.role_overtime_costs = dict(zip(overtime_costs["role"], overtime_costs["overtime_cost_per_hour"]))
@@ -481,19 +478,16 @@ class ShiftSchedulingCpSolver:
                     for emp_id, var in vars_with_emp
                     if skill_name in self.emp_skills.get(emp_id, set())
                 ]
-                if not eligible_vars and not self.skill_slack_enabled:
+                if not eligible_vars:
                     print(
-                        f"[WARN] Turno {shift_id}: nessun dipendente con skill '{skill_name}' disponibile (vincolo hard)"
+                        f"[WARN] Turno {shift_id}: nessun dipendente con skill '{skill_name}' disponibile (vincolo gestito con slack)"
                     )
 
                 assign_expr = sum(eligible_vars) if eligible_vars else 0
-                if self.skill_slack_enabled:
-                    safe_skill = ''.join(ch if ch.isalnum() or ch == '_' else '_' for ch in skill_name)
-                    slack_var = self.model.NewIntVar(0, req, f"short_skill__{shift_id}__{safe_skill}")
-                    self.skill_shortfall_vars[(shift_id, skill_name)] = slack_var
-                    self.model.Add(assign_expr + slack_var >= req)
-                else:
-                    self.model.Add(assign_expr >= req)
+                safe_skill = ''.join(ch if ch.isalnum() or ch == '_' else '_' for ch in skill_name)
+                slack_var = self.model.NewIntVar(0, req, f"short_skill__{shift_id}__{safe_skill}")
+                self.skill_shortfall_vars[(shift_id, skill_name)] = slack_var
+                self.model.Add(assign_expr + slack_var >= req)
 
 
     def _add_segment_coverage_constraints(self) -> None:
@@ -2641,7 +2635,6 @@ def main(argv: list[str] | None = None) -> int:
         global_overtime_cap_minutes=global_ot_cap_minutes,
         random_seed=cfg.random.seed,
         mip_gap=cfg.solver.mip_gap,
-        skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
         objective_mode=cfg.objective.mode,
     )
@@ -2653,7 +2646,6 @@ def main(argv: list[str] | None = None) -> int:
         "solver_time_limit": max_seconds,
         "solver_mip_gap": cfg.solver.mip_gap,
         "random_seed": cfg.random.seed,
-        "skills_slack_enabled": cfg.skills.enable_slack,
         "objective_mode": cfg.objective.mode,
     }
     logger.info("Configurazione risolta: %s", summary)

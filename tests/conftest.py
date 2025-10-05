@@ -131,7 +131,6 @@ def build_solver_from_data(data_dir: Path, cfg: config_loader.Config) -> SimpleN
         global_overtime_cap_minutes=None,
         random_seed=cfg.random.seed,
         mip_gap=cfg.solver.mip_gap,
-        skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
         objective_mode=cfg.objective.mode,
     )
