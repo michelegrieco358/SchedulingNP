@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from dateutil import parser as dtparser
-
 import math
 import pandas as pd
 import warnings
@@ -15,7 +14,6 @@ try:
     from .time_utils import normalize_2400, parse_hhmm_to_min
 except ImportError:  # fallback when running as a script
     from time_utils import normalize_2400, parse_hhmm_to_min  # type: ignore
-
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +166,9 @@ def _parse_shift_skills(raw_value, shift_id: str) -> dict[str, int]:
 
 def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     """
-    Normalizza la colonna contracted_hours implementando la logica di rifattorizzazione:
+    Normalizza la colonna contracted_hours in employees.csv.
     1. Se contracted_hours è valorizzata e min_week_hours != max_week_hours, mostra WARNING per incoerenza
-    2. Se contracted_hours è valorizzata ma min_week_hours e/o max_week_hours non sono presenti,
-       imposta entrambi uguali a contracted_hours
-    3. Assicura che contracted_hours, min_week_hours e max_week_hours siano interi nullable (Int64)
-       e NaN se mancanti
+    2. Se contracted_hours è valorizzata ma min_week_hours e/o max_week_hours non sono presenti, imposta entrambi uguali a contracted_hours
     """
     # --- 1) Assicura che le colonne esistano ---------------------------------
     for col in ("contracted_hours", "min_week_hours", "max_week_hours"):
@@ -207,6 +202,9 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
                     f"employees.csv: Dipendente {emp_id} ha min_week_hours={min_h} diverso da max_week_hours={max_h}",
                     RuntimeWarning,
                 )
+                df.at[idx, "min_week_hours"] = contracted_h
+                df.at[idx, "max_week_hours"] = contracted_h
+
             # 3b) Warning se min o max differiscono da contracted_hours
             for hours, name in [(min_h, "min_week_hours"), (max_h, "max_week_hours")]:
                 if pd.notna(hours) and hours != contracted_h:
@@ -214,6 +212,9 @@ def _normalize_contracted_hours(df: pd.DataFrame) -> None:
                         f"employees.csv: Dipendente {emp_id} ha {name}={hours} diverso da contracted_hours={contracted_h}",
                         RuntimeWarning,
                     )
+                    df.at[idx, "min_week_hours"] = contracted_h
+                    df.at[idx, "max_week_hours"] = contracted_h
+
             # 3c) Se mancano min o max, imposta entrambi uguali a contracted_hours
             if pd.isna(min_h) or pd.isna(max_h):
                 df.at[idx, "min_week_hours"] = contracted_h
@@ -382,11 +383,6 @@ def load_shifts(path: Path, *, max_daily_hours: float | None = None) -> pd.DataF
     else:
         df["skill_requirements"] = [{} for _ in range(len(df))]
 
-    # demand_id opzionale
-    if "demand_id" not in df.columns:
-        df["demand_id"] = ""
-    df["demand_id"] = df["demand_id"].fillna("").astype(str).str.strip()
-
     mean_demand = float("nan")
     if "required_staff" in df.columns:
         mean_demand = pd.to_numeric(df["required_staff"], errors="coerce").mean()
@@ -444,7 +440,6 @@ def load_availability(path: Path, employees: pd.DataFrame, shifts: pd.DataFrame)
     return df
 
 
-
 def build_quali_mask(employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFrame:
     """Restituisce solo le coppie dipendente-turno qualificate (qual_ok=1)."""
     roles_exploded = employees[["employee_id", "roles"]].copy()
@@ -457,8 +452,6 @@ def build_quali_mask(employees: pd.DataFrame, shifts: pd.DataFrame) -> pd.DataFr
     quali = merged[["employee_id", "shift_id"]].drop_duplicates().copy()
     quali["qual_ok"] = 1
     return quali
-
-
 
 
 def load_overtime_costs(path: Path) -> pd.DataFrame:
@@ -535,7 +528,7 @@ def load_windows(
     path: Path,
     shifts: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Carica windows.csv (schema attuale) restituendo colonne normalizzate in minuti."""
+    """Carica windows.csv restituendo colonne normalizzate in minuti."""
     extended_cols = WINDOW_BASE_COLS + ["window_start_min", "window_end_min", "window_minutes"]
     if not path.exists():
         raise FileNotFoundError(f"{path.name} non trovato: il file windows.csv è obbligatorio.")
@@ -555,7 +548,7 @@ def load_windows(
     if df.empty:
         raise ValueError(f"{path.name}: tutte le finestre prive di identificativo valido sono state scartate")
     df.loc[:, "window_id"] = s[valid]
-    #Il file windows.csv deve contenere solo record in cui il campo end è maggiore o uguale al campo start. Record con end < start non sono accettati e vengono ignorati o generano errore.
+    #Il file windows.csv deve contenere solo record in cui il campo end è maggiore o uguale al campo start. 
     # duplicati window_id: warning e tieni l'ultima occorrenza
     if df["window_id"].duplicated().any():
         warnings.warn("windows.csv: window_id duplicati, mantengo l'ultima occorrenza", RuntimeWarning)
@@ -621,8 +614,8 @@ def load_time_off(path: Path, employees: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["employee_id"] = df["employee_id"].astype("string").str.strip()
     df["day"] = df["day"].astype("string").str.strip()
-    df["reason"] = df.get("reason", "").fillna("").astype("string").str.strip()
-
+    default_reason = pd.Series("", index=df.index, dtype="string")
+    df["reason"] = df.get("reason", default_reason).astype("string").fillna("").str.strip()
 
     def _parse_optional_time(value):
         if pd.isna(value):
@@ -770,7 +763,7 @@ import pandas as pd
 import numpy as np
 
 def load_data_bundle(data_dir: Path, *, config: object | None = None) -> SimpleNamespace:
-    """Carica tutti i dataset (v2.0+), inclusi windows.csv (obbligatorio)."""
+    """Carica tutti i dataset"""
     data_dir = Path(data_dir)
 
     # windows.csv è obbligatorio
