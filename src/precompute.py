@@ -178,16 +178,14 @@ def build_adaptive_slots(data, config, windows_df=None) -> AdaptiveSlotData:
             add_segment(shift_id, base_day, role, start_min, end_min)
             continue
 
-        if midnight_policy == "exclude":
-            add_segment(shift_id, base_day, role, start_min, 1440)
-        elif midnight_policy == "split":
-            if start_min < 1440:
-                add_segment(shift_id, base_day, role, start_min, 1440)
-            next_day = base_day + timedelta(days=1)
-            if end_min > 0:
-                add_segment(shift_id, next_day, role, 0, end_min)
-        else:
+        if midnight_policy != "split":
             raise ValueError(f"Midnight policy sconosciuta: {midnight_policy}")
+
+        if start_min < 1440:
+            add_segment(shift_id, base_day, role, start_min, 1440)
+        next_day = base_day + timedelta(days=1)
+        if end_min > 0:
+            add_segment(shift_id, next_day, role, 0, end_min)
 
     slots_by_day_role: Dict[tuple[date, str], List[str]] = {}
     slot_minutes: Dict[str, int] = {}

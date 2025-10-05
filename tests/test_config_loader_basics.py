@@ -13,7 +13,7 @@ def test_load_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     cfg = config_loader.load_config()
 
     assert cfg.hours.max_weekly == 40
-    assert cfg.skills.enable_slack is True
+    assert cfg.skills.model_dump() == {}
     assert cfg.objective.priority[0] == "unmet_window"
     assert list(cfg.objective.priority) == list(config_loader.PRIORITY_KEYS)
 
@@ -24,7 +24,6 @@ def test_load_config_custom(tmp_path: Path) -> None:
         {
             "hours": {"max_weekly": 50},
             "rest": {"min_between_shifts": 10},
-            "skills": {"enable_slack": False},
             "logging": {"level": "debug"},
         },
         cfg_path.open("w", encoding="utf-8"),
@@ -33,7 +32,6 @@ def test_load_config_custom(tmp_path: Path) -> None:
     cfg = config_loader.load_config(str(cfg_path))
     assert cfg.hours.max_weekly == 50
     assert cfg.rest.min_between_shifts == 10
-    assert cfg.skills.enable_slack is False
     assert cfg.logging.level == "DEBUG"
 
 
