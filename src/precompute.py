@@ -390,7 +390,7 @@ def map_windows_to_slots(
     adaptive_data: AdaptiveSlotData,
     windows_df: pd.DataFrame | None,
     *,
-    strict: bool = True,
+    strict: bool = False,
     merge_signatures: bool = True,
 ) -> tuple[AdaptiveSlotData, Dict[str, List[str]], Dict[str, frozenset[str]]]:
     """Map windows to slots and validate potential coverage."""
