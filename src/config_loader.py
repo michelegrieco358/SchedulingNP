@@ -48,18 +48,6 @@ class RestConfig(BaseModel):
 class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enable_slack: bool = True
-    skill_mode: str = Field("by_shift")
-
-    @field_validator("skill_mode")
-    @classmethod
-    def validate_skill_mode(cls, value: str) -> str:
-        modes = {"by_shift", "by_segment"}
-        value = value.strip().lower()
-        if value not in modes:
-            raise ValueError(f"skill_mode deve essere uno tra {sorted(modes)}")
-        return value
-
 class WindowsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,10 +58,9 @@ class WindowsConfig(BaseModel):
     @field_validator("midnight_policy")
     @classmethod
     def check_policy(cls, value: str) -> str:
-        allowed = {"split", "extend"}  # o le opzioni che vuoi supportare
         value = value.strip().lower()
-        if value not in allowed:
-            raise ValueError(f"midnight_policy deve essere uno tra {sorted(allowed)}")
+        if value != "split":
+            raise ValueError("midnight_policy supporta solo il valore 'split'")
         return value
 
 

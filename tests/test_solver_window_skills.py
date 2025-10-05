@@ -103,7 +103,6 @@ def test_solver_excludes_unskilled_workers(sample_environment):
         global_overtime_cap_minutes=None,
         random_seed=cfg.random.seed,
         mip_gap=cfg.solver.mip_gap,
-        skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
         objective_mode=cfg.objective.mode,
     )
@@ -159,8 +158,6 @@ def test_shift_skill_requirements_parsed_from_string(sample_environment):
 
     cfg = sample_environment.cfg
     cfg.shifts.coverage_source = "shifts"
-    cfg.skills.enable_slack = False
-
     (
         employees,
         shifts,
@@ -210,7 +207,6 @@ def test_shift_skill_requirements_parsed_from_string(sample_environment):
         global_overtime_cap_minutes=None,
         random_seed=cfg.random.seed,
         mip_gap=cfg.solver.mip_gap,
-        skills_slack_enabled=cfg.skills.enable_slack,
         objective_priority=tuple(objective_priority),
         objective_mode=cfg.objective.mode,
     )
@@ -236,6 +232,7 @@ def test_shift_skill_requirements_parsed_from_string(sample_environment):
 
     solver.demand_mode = cfg.shifts.demand_mode
     solver.build()
+    assert ("S1", "skillA") in solver.skill_shortfall_vars
     cp_solver = solver.solve()
 
     assert cp_solver.StatusName() == "OPTIMAL"

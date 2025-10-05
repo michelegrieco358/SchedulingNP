@@ -5,8 +5,6 @@ hours:
   max_overtime: 4
 rest:
   min_between_shifts: 8
-skills:
-  enable_slack: true
 shifts:
   demand_mode: "person_minutes"  # ModalitÃ  volume di lavoro
 penalties:

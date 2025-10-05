@@ -164,6 +164,96 @@ def _parse_shift_skills(raw_value, shift_id: str) -> dict[str, int]:
     return _parse_skill_mapping(raw_value, source="shifts.csv", entity_id=str(shift_id))
 
 
+def _split_overnight_windows(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalizza le finestre overnight dividendole in blocchi day/day+1."""
+
+    if df.empty:
+        return df
+
+    rows: list[dict] = []
+    seen_ids: set[str] = set()
+
+    def _normalize_base_id(raw_id: str | None, *, index: int) -> str:
+        text = "" if raw_id is None else str(raw_id).strip()
+        if not text or text.lower() == "nan":
+            return f"WIN_{index}"
+        return text
+
+    def _ensure_unique(candidate: str) -> str:
+        base = candidate
+        counter = 1
+        while candidate in seen_ids:
+            candidate = f"{base}__{counter}"
+            counter += 1
+        seen_ids.add(candidate)
+        return candidate
+
+    for row in df.itertuples():
+        original_index = getattr(row, "Index", 0)
+        base_id = _normalize_base_id(getattr(row, "window_id", None), index=original_index)
+        day = row.day
+        role = row.role
+        start_min = int(row.window_start_min)
+        end_min = int(row.window_end_min)
+        demand = int(row.window_demand)
+        skills = getattr(row, "skill_requirements", {}) or {}
+        if isinstance(skills, dict):
+            skills_template = dict(skills)
+        else:
+            try:
+                skills_template = dict(skills)
+            except TypeError:
+                skills_template = {}
+
+        def _add_row(window_id: str, row_day, start_val: int, end_val: int) -> None:
+            unique_id = _ensure_unique(window_id)
+            rows.append(
+                {
+                    "window_id": unique_id,
+                    "day": row_day,
+                    "role": role,
+                    "window_start_min": start_val,
+                    "window_end_min": end_val,
+                    "window_demand": demand,
+                    "skill_requirements": dict(skills_template),
+                }
+            )
+
+        if end_min > start_min:
+            _add_row(base_id, day, start_min, end_min)
+            continue
+
+        # Parte A: stessa giornata fino a mezzanotte
+        _add_row(f"{base_id}__D0", day, start_min, 1440)
+
+        # Parte B: giorno successivo, solo se ha durata positiva
+        if end_min > 0:
+            _add_row(f"{base_id}__D1", day + timedelta(days=1), 0, end_min)
+
+    normalized = pd.DataFrame(
+        rows,
+        columns=[
+            "window_id",
+            "day",
+            "role",
+            "window_start_min",
+            "window_end_min",
+            "window_demand",
+            "skill_requirements",
+        ],
+    )
+
+    normalized["window_minutes"] = normalized["window_end_min"] - normalized["window_start_min"]
+    invalid = normalized["window_minutes"] <= 0
+    if invalid.any():
+        bad_ids = normalized.loc[invalid, "window_id"].tolist()
+        raise ValueError(
+            "windows.csv: finestre non normalizzate dopo split; atteso start < end per %s" % bad_ids
+        )
+
+    return normalized
+
+
 def _normalize_contracted_hours(df: pd.DataFrame) -> None:
     """
     Normalizza la colonna contracted_hours in employees.csv.
@@ -528,7 +618,7 @@ def load_windows(
     path: Path,
     shifts: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Carica windows.csv restituendo colonne normalizzate in minuti."""
+    """Carica windows.csv restituendo finestre day-local già spezzate sugli overnight."""
     extended_cols = WINDOW_BASE_COLS + ["window_start_min", "window_end_min", "window_minutes"]
     if not path.exists():
         raise FileNotFoundError(f"{path.name} non trovato: il file windows.csv è obbligatorio.")
@@ -557,8 +647,6 @@ def load_windows(
     df["day"] = df["day"].apply(_parse_date_iso)
     df["window_start_min"] = df["window_start"].apply(parse_hhmm_to_min)
     df["window_end_min"] = df["window_end"].apply(parse_hhmm_to_min)
-    df["window_start"] = df["window_start_min"].apply(_minutes_to_time)
-    df["window_end"] = df["window_end_min"].apply(_minutes_to_time)
 
     # role come string senza trasformare NaN in "nan"
     df["role"] = df["role"].astype("string").str.strip()
@@ -566,14 +654,6 @@ def load_windows(
     df["window_demand"] = pd.to_numeric(df["window_demand"], errors="coerce").fillna(0).astype(int)
     if (df["window_demand"] < 0).any():
         raise ValueError(f"{path.name}: window_demand deve essere >= 0")
-
-    # Regola: window_end deve essere strettamente maggiore di window_start
-    invalid_bounds = df["window_end_min"] <= df["window_start_min"]
-    if invalid_bounds.any():
-        bad_ids = df.loc[invalid_bounds, "window_id"].tolist()
-        raise ValueError(f"{path.name}: window_end deve essere maggiore di window_start per {bad_ids}")
-
-    df["window_minutes"] = df["window_end_min"] - df["window_start_min"]
 
     # Parse skills column if present
     if "skills" in df.columns:
@@ -587,6 +667,10 @@ def load_windows(
         # dizionari non condivisi tra le righe
         df["skill_requirements"] = [{} for _ in range(len(df))]
         extended_cols = extended_cols + ["skill_requirements"]
+
+    df = _split_overnight_windows(df)
+    df["window_start"] = df["window_start_min"].apply(_minutes_to_time)
+    df["window_end"] = df["window_end_min"].apply(_minutes_to_time)
 
     if shifts is not None and not shifts.empty:
         known_roles = set(shifts["role"].astype(str).str.strip())
