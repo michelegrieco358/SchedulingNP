@@ -5,34 +5,33 @@ hours:
   max_overtime: 4
 rest:
   min_between_shifts: 8
- 
 shifts:
   demand_mode: "headcount"  # "headcount" | "person_minutes"
-  coverage_source: "windows"  # "windows" | "shifts"
+  coverage_source: windows
 penalties:
   unmet_window: 2.0
   unmet_demand: 1.0
   unmet_skill: 0.8
   overstaff: 0.15
-  overtime: 0.30
-  external_use: 0.70
+  overtime: 0.3
+  external_use: 0.7
   preferences: 0.33
   fairness: 0.05
 objective:
-  mode: lex             # "weighted" | "lex"
+  mode: lex
   priority:
-    - unmet_window
-    - unmet_demand
-    - unmet_skill
-    - overstaff
-    - external_use
-    - overtime
-    - fairness
-    - preferences
+  - unmet_window
+  - unmet_demand
+  - unmet_skill
+  - overstaff
+  - external_use
+  - overtime
+  - fairness
+  - preferences
 random:
   seed: 123
 solver:
-  time_limit_sec: null
+  time_limit_sec: 120
   mip_gap: null
 logging:
   level: INFO
