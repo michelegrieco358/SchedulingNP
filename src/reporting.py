@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SegmentCoverage:
-    """Dati di copertura per un segmento temporale."""
+    """Dati di copertura per un segmento/slot temporale di domanda."""
     segment_id: str
     day: str
     role: str
@@ -547,7 +547,7 @@ class ScheduleReporter:
             print("\nNessun dato di copertura disponibile")
             return
 
-        print("\n=== Copertura Segmenti ===")
+        print("\n=== Copertura Segmenti (slot di domanda) ===")
 
         total_segments = len(coverage_df)
         covered = len(coverage_df[coverage_df["shortfall"] == 0])
@@ -657,10 +657,16 @@ class ScheduleReporter:
             demand_gap = (demand_sum / 60.0) - total_capacity
             if demand_gap > 0:
                 print(f"Domanda eccedente la capacità stimata di circa {demand_gap:.1f} h")
+            else:
+                print("Domanda all'interno della capacità teorica stimata")
         except Exception as exc:  # pragma: no cover - diagnostica
             logger.debug("Impossibile calcolare la capacità teorica: %s", exc)
 
         if not coverage_df.empty:
+            print(
+                "Nota: ogni segmento corrisponde a uno slot di domanda ottenuto incrociando "
+                "le finestre temporali con i turni considerati dal modello."
+            )
             self._plot_coverage(coverage_df)
 
     def _plot_coverage(self, coverage_df: pd.DataFrame) -> None:
