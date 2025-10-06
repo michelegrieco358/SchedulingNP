@@ -6,7 +6,7 @@ hours:
 rest:
   min_between_shifts: 8
 shifts:
-  demand_mode: person_minutes
+  demand_mode: "headcount"  # "headcount" | "person_minutes"
   coverage_source: windows
 penalties:
   unmet_window: 2.0
